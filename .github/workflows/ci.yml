@@ -44,4 +44,7 @@ jobs:
             libwayland-dev
 
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --all-targets
+
+      - name: Boot the scanner
+        run: ./scripts/ci-runtime.sh target/debug/spacetree

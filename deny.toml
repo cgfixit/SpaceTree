@@ -1,0 +1,41 @@
+[graph]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.30 is locked by eframe 0.31 accesskit. SpaceTree does not parse XML." },
+    { id = "RUSTSEC-2026-0195", reason = "same quick-xml 0.30 pin. No upgrade without leaving eframe 0.31." },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25 has no published upgrade. egui uses it for bundled fonts." },
+    { crate = "url@2.5.3", reason = "direct pin in Cargo.toml so the eframe 0.31 graph still builds." },
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

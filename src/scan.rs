@@ -180,61 +180,61 @@ fn apfs_clone_id(path: &Path) -> Option<u64> {
     }
     #[cfg(target_os = "macos")]
     {
-    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
-    #[repr(C)]
-    struct AttrList {
-        bitmapcount: u16,
-        reserved: u16,
-        commonattr: u32,
-        volattr: u32,
-        dirattr: u32,
-        fileattr: u32,
-        forkattr: u32,
-    }
-    let mut alist = AttrList {
-        bitmapcount: 5,
-        reserved: 0,
-        commonattr: 0,
-        volattr: 0,
-        dirattr: 0,
-        fileattr: 0,
-        forkattr: 0x0000_0100, // ATTR_CMNEXT_CLONEID
-    };
-    let mut buf = [0u8; 32];
-    const FSOPT_NOFOLLOW: libc::c_ulong = 0x1;
-    const FSOPT_ATTR_CMN_EXTENDED: libc::c_ulong = 0x20;
-    extern "C" {
-        fn getattrlist(
-            path: *const libc::c_char,
-            attr_list: *mut libc::c_void,
-            attr_buf: *mut libc::c_void,
-            attr_buf_size: libc::size_t,
-            options: libc::c_ulong,
-        ) -> libc::c_int;
-    }
-    let rc = unsafe {
-        // SAFETY: `c` is NUL-terminated; `alist`/`buf` are valid out-params.
-        getattrlist(
-            c.as_ptr(),
-            (&mut alist as *mut AttrList).cast(),
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            FSOPT_NOFOLLOW | FSOPT_ATTR_CMN_EXTENDED,
-        )
-    };
-    if rc != 0 {
-        return None;
-    }
-    let len = u32::from_le_bytes(buf[0..4].try_into().ok()?) as usize;
-    if len < 12 {
-        return None;
-    }
-    let id = u64::from_le_bytes(buf[4..12].try_into().ok()?);
-    if id == 0 {
-        None
-    } else {
-        Some(id)
-    }
+        let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+        #[repr(C)]
+        struct AttrList {
+            bitmapcount: u16,
+            reserved: u16,
+            commonattr: u32,
+            volattr: u32,
+            dirattr: u32,
+            fileattr: u32,
+            forkattr: u32,
+        }
+        let mut alist = AttrList {
+            bitmapcount: 5,
+            reserved: 0,
+            commonattr: 0,
+            volattr: 0,
+            dirattr: 0,
+            fileattr: 0,
+            forkattr: 0x0000_0100, // ATTR_CMNEXT_CLONEID
+        };
+        let mut buf = [0u8; 32];
+        const FSOPT_NOFOLLOW: libc::c_ulong = 0x1;
+        const FSOPT_ATTR_CMN_EXTENDED: libc::c_ulong = 0x20;
+        extern "C" {
+            fn getattrlist(
+                path: *const libc::c_char,
+                attr_list: *mut libc::c_void,
+                attr_buf: *mut libc::c_void,
+                attr_buf_size: libc::size_t,
+                options: libc::c_ulong,
+            ) -> libc::c_int;
+        }
+        let rc = unsafe {
+            // SAFETY: `c` is NUL-terminated; `alist`/`buf` are valid out-params.
+            getattrlist(
+                c.as_ptr(),
+                (&mut alist as *mut AttrList).cast(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                FSOPT_NOFOLLOW | FSOPT_ATTR_CMN_EXTENDED,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        let len = u32::from_le_bytes(buf[0..4].try_into().ok()?) as usize;
+        if len < 12 {
+            return None;
+        }
+        let id = u64::from_le_bytes(buf[4..12].try_into().ok()?);
+        if id == 0 {
+            None
+        } else {
+            Some(id)
+        }
     }
 }
 

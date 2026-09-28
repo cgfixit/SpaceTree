@@ -1,0 +1,38 @@
+name: gitleaks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitleaks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          set -eu
+          version=8.30.1
+          file="gitleaks_${version}_linux_x64.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${version}/${file}"
+          curl -fsSL -o "$file" "$url"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${file}" | sha256sum -c
+          tar -xzf "$file" gitleaks
+          install -m 0755 gitleaks "$HOME/gitleaks"
+
+      - name: Scan git history
+        run: |
+          "$HOME/gitleaks" detect --source . --redact --no-banner --exit-code 1

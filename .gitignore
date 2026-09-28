@@ -1,9 +1,11 @@
-# Cargo
+# Rust
+# https://github.com/github/gitignore/blob/main/Rust.gitignore
 debug/
 target/
 **/*.rs.bk
 *.pdb
 **/mutants.out*/
+rustc-ice-*.txt
 
 # App bundle and debug symbols. Rebuild with scripts/make-app.sh.
 /dist/
@@ -11,17 +13,35 @@ target/
 **/*.dSYM/
 
 # macOS
+# https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
 .DS_Store
 **/.DS_Store
 .AppleDouble
 .LSOverride
+._*
+.localized
+__MACOSX/
+Icon?
+
+# Linux
+# https://github.com/github/gitignore/blob/main/Global/Linux.gitignore
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+nohup.out
 
 # Editors
 .idea/
 .vscode/
 *.swp
-*~
+*.swo
 
-# Coverage
+# Coverage and core dumps
 *.profraw
 *.profdata
+tarpaulin-report.html
+lcov.info
+core
+core.[0-9]*

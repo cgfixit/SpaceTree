@@ -42,7 +42,12 @@ Packaging notes are in `docs/BUILD.md`.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs `cargo test --locked` on `macos-latest` and `ubuntu-latest` for each push and pull request.
+GitHub Actions runs on each push and pull request.
+
+- `.github/workflows/ci.yml` runs `cargo test --locked --all-targets` on macOS and Ubuntu, then boots `spacetree --help` and `spacetree --scan` on a temporary folder.
+- `.github/workflows/gitleaks.yml` scans git history with the gitleaks binary.
+- `.github/workflows/cargo-deny.yml` checks dependency licenses, advisories, and crate sources.
+- `.github/workflows/lint.yml` checks formatting and the workflow files.
 
 ## Where the code lives
 
