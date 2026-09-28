@@ -31,7 +31,7 @@ fn tile<'a>(tiling: &'a spacetree::Tiling, name: &str) -> &'a PxRect {
     &tiling
         .tiles()
         .iter()
-        .find(|t| t.path == PathBuf::from(name))
+        .find(|t| t.path.as_path() == Path::new(name))
         .unwrap_or_else(|| panic!("missing {name}"))
         .rect
 }
@@ -112,7 +112,7 @@ fn directories_are_frames_not_tiles() {
     assert!(tiling
         .tiles()
         .iter()
-        .all(|t| t.path != PathBuf::from("left")));
+        .all(|t| t.path.as_path() != Path::new("left")));
 }
 
 fn tree_node(path: &str, is_dir: bool, children: Vec<Node>) -> Node {
