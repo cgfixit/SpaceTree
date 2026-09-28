@@ -73,10 +73,12 @@ jobs:
             printf '%s\n' "$zip" >&2
             exit 1
           fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "run_id=$id" >> "$GITHUB_OUTPUT"
-          echo "run_url=$url" >> "$GITHUB_OUTPUT"
-          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+          {
+            echo "sha=$sha"
+            echo "run_id=$id"
+            echo "run_url=$url"
+            echo "zip=$zip"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout the bundled commit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
