@@ -8,7 +8,7 @@ export MACOSX_DEPLOYMENT_TARGET=12.0
 cd "$ROOT"
 
 echo "shipping host arch only ($(rustc --version | awk '{print $2}'))" >&2
-cargo build --release
+cargo build --release --locked
 BIN="$ROOT/target/release/spacetree"
 if [ ! -x "$BIN" ]; then
   echo "no spacetree binary at $BIN" >&2

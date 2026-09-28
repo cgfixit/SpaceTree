@@ -1,0 +1,142 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type release to publish the latest successful main bundle
+        required: true
+        type: string
+      notes:
+        description: Optional extra release notes
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    name: publish bundled app
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Require main and the word release
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Run this workflow from main. Refusing $GITHUB_REF." >&2
+            exit 1
+          fi
+          if [ "$CONFIRM" != "release" ]; then
+            echo "confirm must be the exact word release." >&2
+            exit 1
+          fi
+
+      - name: Download the latest successful main bundle
+        id: bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          runs="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow bundle.yml \
+            --branch main \
+            --status success \
+            --limit 1 \
+            --json databaseId,headSha,url)"
+          if [ "$(printf '%s' "$runs" | jq 'length')" != "1" ]; then
+            echo "no successful bundle.yml run on main" >&2
+            exit 1
+          fi
+          id="$(printf '%s' "$runs" | jq -r '.[0].databaseId')"
+          sha="$(printf '%s' "$runs" | jq -r '.[0].headSha')"
+          url="$(printf '%s' "$runs" | jq -r '.[0].url')"
+          case "$sha" in
+            *[!0-9a-f]*|"" ) echo "bad bundle sha" >&2; exit 1 ;;
+          esac
+          if [ "${#sha}" -lt 7 ]; then
+            echo "bad bundle sha" >&2
+            exit 1
+          fi
+          dest="${RUNNER_TEMP}/bundle"
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          gh run download "$id" --repo "$GITHUB_REPOSITORY" --name spacetree-app --dir "$dest"
+          zip="$(find "$dest" -type f -name 'SpaceTree-macos-*.zip')"
+          if [ "$(printf '%s\n' "$zip" | wc -l | tr -d ' ')" != "1" ] || [ ! -f "$zip" ]; then
+            echo "expected exactly one app zip" >&2
+            printf '%s\n' "$zip" >&2
+            exit 1
+          fi
+          {
+            echo "sha=$sha"
+            echo "run_id=$id"
+            echo "run_url=$url"
+            echo "zip=$zip"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the bundled commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.bundle.outputs.sha }}
+          persist-credentials: false
+
+      - name: Verify the zip and publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_SHA: ${{ steps.bundle.outputs.sha }}
+          BUNDLE_URL: ${{ steps.bundle.outputs.run_url }}
+          BUNDLE_ZIP: ${{ steps.bundle.outputs.zip }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          test -f "$BUNDLE_ZIP"
+          unpack="${RUNNER_TEMP}/verify-app"
+          rm -rf "$unpack"
+          mkdir -p "$unpack"
+          ditto -x -k "$BUNDLE_ZIP" "$unpack"
+          app="$unpack/SpaceTree.app"
+          bin="$app/Contents/MacOS/spacetree"
+          test -x "$bin"
+          id="$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")"
+          version="$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")"
+          test "$id" = "com.cgfixit.spacetree"
+          printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+          cargo_version="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
+          if [ "$version" != "$cargo_version" ]; then
+            echo "Info.plist $version does not match Cargo.toml $cargo_version at $BUNDLE_SHA" >&2
+            exit 1
+          fi
+          codesign --verify --verbose=2 "$app"
+          tag="v$version"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $tag already exists" >&2
+            exit 1
+          fi
+          base="$(basename "$BUNDLE_ZIP" .zip)"
+          arch="${base##*-}"
+          asset="${RUNNER_TEMP}/SpaceTree-${version}-macos-${arch}.app.zip"
+          cp "$BUNDLE_ZIP" "$asset"
+          notes="${RUNNER_TEMP}/notes.md"
+          {
+            printf 'SpaceTree %s for macOS (%s).\n\n' "$version" "$arch"
+            printf 'This asset is the zip from the bundle workflow. This release did not rebuild it.\n'
+            printf 'Commit: %s\n' "$BUNDLE_SHA"
+            printf 'Bundle run: %s\n\n' "$BUNDLE_URL"
+            printf 'Ad-hoc signed with codesign --sign -. Not notarized.\n'
+            printf 'First launch: right-click SpaceTree.app and choose Open.\n'
+            printf 'Unzip with Finder, or: ditto -x -k --keepParent <asset> .\n'
+            if [ -n "$NOTES" ]; then
+              printf '\n%s\n' "$NOTES"
+            fi
+          } > "$notes"
+          gh release create "$tag" "$asset" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$BUNDLE_SHA" \
+            --title "SpaceTree $version" \
+            --notes-file "$notes"

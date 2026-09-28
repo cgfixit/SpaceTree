@@ -1,12 +1,18 @@
 use std::collections::{BTreeMap, HashSet};
-use std::ffi::{CString, OsString};
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
+use std::ffi::OsString;
 use std::fs::{self, Metadata};
 use std::io;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
+#[cfg(target_os = "macos")]
+use std::time::{Duration, UNIX_EPOCH};
 
 use rayon::prelude::*;
 
@@ -176,7 +182,7 @@ fn apfs_clone_id(path: &Path) -> Option<u64> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = path;
-        return None;
+        None
     }
     #[cfg(target_os = "macos")]
     {
@@ -673,6 +679,7 @@ fn walk_dir(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_dir_known(
     path: &Path,
     modified: Option<SystemTime>,
