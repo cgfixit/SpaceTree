@@ -1,8 +1,8 @@
 # SpaceTree
 
-SpaceTree is a macOS disk usage app. You pick a folder. The window lists each child and draws a treemap of the same allocated bytes.
+SpaceTree is a macOS disk usage app. You pick a folder or a disk. The window lists each child and draws a treemap of the same allocated bytes.
 
-The window has three parts.
+![CG Agent Harness running on macOS](/screenshots/SpaceTree-9.28.26.jpeg)
 
 - The table columns are Name, Size Proportion, Percentage, Physical Size, Logical Size, and Files. Percentage is that row's allocated bytes divided by the scan root. The scan root is 100%.
 - The treemap draws one rectangle per file. Area is allocated size. Color is the file extension. A folder is a frame around its children. Double-click a folder to zoom in. Double-click a file to reveal it in Finder. Zoom out walks back to the parent, then to the scan root. A single click selects a row and does not zoom.
@@ -38,16 +38,13 @@ open dist/SpaceTree.app
 
 `scripts/make-app.sh` builds a release binary, copies `Info.plist`, and ad-hoc signs `dist/SpaceTree.app`. The bundle id is `com.cgfixit.spacetree`, version 0.1.0. The app is not signed with an Apple Developer ID. On first launch, right-click SpaceTree.app and choose Open, then confirm.
 
-Packaging notes are in `docs/BUILD.md`.
 
-## Continuous integration
+## Continuous Development (kinda; im sure df can be formatted and used with fancy flags to look all pretty but I mean unless im literally using linux without x why would I act like thats better. Research that later to make sure im not missing out on things that are better than the GUI habit I keep vibe coding from windows concepts (shoutout to WinDirStat):
 
-GitHub Actions runs on each push and pull request.
-
-- `.github/workflows/ci.yml` runs `cargo test --locked --all-targets` on macOS and Ubuntu, then boots `spacetree --help` and `spacetree --scan` on a temporary folder.
-- `.github/workflows/gitleaks.yml` scans git history with the gitleaks binary.
-- `.github/workflows/cargo-deny.yml` checks dependency licenses, advisories, and crate sources.
-- `.github/workflows/lint.yml` checks formatting and the workflow files.
+- Add right-click -> open in finder option to every object
+- make default zoom and column widths closer to what I'd set it to myself
+- See if theres a way to increase speed of scan without shortcuts
+- Resiliency testing for non internal drive (usb/network share/etc ...)
 
 ## Where the code lives
 
