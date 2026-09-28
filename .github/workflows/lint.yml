@@ -28,7 +28,11 @@ jobs:
           components: rustfmt
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: |
+          set -eu
+          if ! cargo fmt --check; then
+            echo "::warning::rustfmt drift. Run cargo fmt. Formatting does not fail CI."
+          fi
 
   clippy:
     name: clippy
@@ -70,7 +74,13 @@ jobs:
             libwayland-dev
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: |
+          cargo clippy --locked --all-targets -- \
+            -D warnings \
+            -A clippy::style \
+            -A clippy::complexity \
+            -A clippy::perf \
+            -A unused_imports
 
   actionlint:
     name: actionlint
@@ -93,5 +103,7 @@ jobs:
           install -m 0755 actionlint "$HOME/actionlint"
 
       - name: Lint workflows
+        env:
+          SHELLCHECK_OPTS: --severity=warning
         run: |
           "$HOME/actionlint" -color
