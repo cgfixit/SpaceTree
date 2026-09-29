@@ -9,7 +9,8 @@ cd "$ROOT"
 
 echo "shipping host arch only ($(rustc --version | awk '{print $2}'))" >&2
 cargo build --release --locked
-BIN="$ROOT/target/release/spacetree"
+TARGET_DIR="$(cargo metadata --format-version=1 --no-deps | plutil -extract target_directory raw -o - -)"
+BIN="$TARGET_DIR/release/spacetree"
 if [ ! -x "$BIN" ]; then
   echo "no spacetree binary at $BIN" >&2
   exit 1
