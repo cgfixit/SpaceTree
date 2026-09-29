@@ -7,6 +7,9 @@ pub fn format_scan(result: &ScanResult) -> String {
     let mut out = String::new();
     out.push_str(&format!("volume_total_bytes={}\n", result.volume_total));
     out.push_str(&format!("root_size_bytes={}\n", result.root.size));
+    if result.error_count > 0 {
+        out.push_str(&format!("scan_incomplete_errors={}\n", result.error_count));
+    }
     push_node(&mut out, &result.root, 0);
     out
 }

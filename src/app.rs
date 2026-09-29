@@ -284,6 +284,22 @@ impl eframe::App for SpaceTreeApp {
                     ui.label("Ready");
                 }
             });
+            if let Some(result) = &self.result {
+                if result.error_count > 0 {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!(
+                            "Scan incomplete: {} read {}. Sizes are partial.",
+                            result.error_count,
+                            if result.error_count == 1 {
+                                "error"
+                            } else {
+                                "errors"
+                            }
+                        ),
+                    );
+                }
+            }
             if let Some(note) = &self.last_note {
                 ui.separator();
                 ui.label(note);
