@@ -3,7 +3,21 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--scan") {
         let path = args.get(i + 1).cloned().unwrap_or_else(|| ".".into());
         match spacetree::scan(std::path::Path::new(&path)) {
-            Ok(result) => print!("{}", spacetree::format_scan(&result)),
+            Ok(result) => {
+                print!("{}", spacetree::format_scan(&result));
+                if result.error_count > 0 {
+                    eprintln!(
+                        "scan incomplete: {} read {}; sizes are partial",
+                        result.error_count,
+                        if result.error_count == 1 {
+                            "error"
+                        } else {
+                            "errors"
+                        }
+                    );
+                    std::process::exit(1);
+                }
+            }
             Err(e) => {
                 eprintln!("scan failed: {e}");
                 std::process::exit(1);

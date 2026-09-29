@@ -27,7 +27,7 @@ cargo test
 cargo run -- --scan /path/to/folder
 ```
 
-`--scan` prints two header lines, `volume_total_bytes` and `root_size_bytes`, then one indented line per node.
+`--scan` prints two header lines, `volume_total_bytes` and `root_size_bytes`, then one indented line per node. If some entries could not be read, the report adds `scan_incomplete_errors`, retains readable results, and exits nonzero with a warning on stderr. A root directory that cannot be read fails without a report. The app keeps an incomplete-scan warning visible alongside partial results.
 
 Package the app:
 

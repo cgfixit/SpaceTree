@@ -9,6 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 #[cfg(target_os = "macos")]
@@ -48,6 +49,8 @@ struct ExtSum {
 pub struct ScanResult {
     pub root: Node,
     pub volume_total: u64,
+    /// Failed directory reads or entry metadata reads. Zero means none were observed.
+    pub error_count: u64,
 }
 
 /// Walk `path`. Follow a symlink-to-dir only at this user-chosen root (so `/tmp`
@@ -60,19 +63,24 @@ pub fn scan(path: &Path) -> io::Result<ScanResult> {
     let volume_total = volume_total_bytes(path);
     let seen = Mutex::new(HashSet::new());
     let clones = Mutex::new(HashSet::new());
+    let errors = AtomicU64::new(0);
     let root = if lmeta.file_type().is_dir() {
-        walk_dir(path, &lmeta, volume_total, path, &seen, &clones).0
+        walk_dir(path, &lmeta, volume_total, path, &seen, &clones, &errors)?.0
     } else if lmeta.file_type().is_symlink() {
         let followed = fs::metadata(path)?;
         if followed.is_dir() {
-            walk_dir(path, &followed, volume_total, path, &seen, &clones).0
+            walk_dir(path, &followed, volume_total, path, &seen, &clones, &errors)?.0
         } else {
             leaf(path, &lmeta, volume_total, &clones).0
         }
     } else {
         leaf(path, &lmeta, volume_total, &clones).0
     };
-    Ok(ScanResult { root, volume_total })
+    Ok(ScanResult {
+        root,
+        volume_total,
+        error_count: errors.into_inner(),
+    })
 }
 
 pub(crate) fn percent_of_disk(size: u64, volume_total: u64) -> f64 {
@@ -333,13 +341,13 @@ fn open_dir(path: &Path) -> io::Result<DirFd> {
 }
 
 #[cfg(target_os = "macos")]
-fn list_bulk(path: &Path) -> io::Result<Vec<BulkEnt>> {
+fn list_bulk(path: &Path, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>> {
     let dir = open_dir(path)?;
-    list_bulk_fd(dir.0)
+    list_bulk_fd(dir.0, errors)
 }
 
 #[cfg(target_os = "macos")]
-fn list_bulk_fd(fd: libc::c_int) -> io::Result<Vec<BulkEnt>> {
+fn list_bulk_fd(fd: libc::c_int, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>> {
     let mut alist = AttrList {
         bitmapcount: 5,
         reserved: 0,
@@ -357,6 +365,7 @@ fn list_bulk_fd(fd: libc::c_int) -> io::Result<Vec<BulkEnt>> {
     };
     let mut buf = vec![0u8; 256 * 1024];
     let mut out = Vec::new();
+    let mut got_batch = false;
     unsafe extern "C" {
         fn getattrlistbulk(
             dirfd: libc::c_int,
@@ -382,14 +391,20 @@ fn list_bulk_fd(fd: libc::c_int) -> io::Result<Vec<BulkEnt>> {
                 buf.resize(buf.len() * 2, 0);
                 continue;
             }
+            if got_batch {
+                errors.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
             return Err(err);
         }
         if n == 0 {
             break;
         }
+        got_batch = true;
         let mut off = 0usize;
         for _ in 0..n {
             let Some((next, ent)) = parse_bulk_entry(&buf, off) else {
+                errors.fetch_add(1, Ordering::Relaxed);
                 break;
             };
             off = next;
@@ -551,14 +566,22 @@ fn system_time(sec: i64, nsec: i64) -> Option<SystemTime> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn list_bulk(path: &Path) -> io::Result<Vec<BulkEnt>> {
+fn list_bulk(path: &Path, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>> {
     let mut out = Vec::new();
-    for ent in fs::read_dir(path)?.flatten() {
+    for ent in fs::read_dir(path)? {
+        let ent = match ent {
+            Ok(ent) => ent,
+            Err(_) => {
+                errors.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+        };
         let name = ent.file_name();
         if name == "." || name == ".." {
             continue;
         }
         let Ok(meta) = fs::symlink_metadata(ent.path()) else {
+            errors.fetch_add(1, Ordering::Relaxed);
             continue;
         };
         let objtype = if meta.file_type().is_symlink() {
@@ -614,6 +637,7 @@ fn leaf_from_bulk(
     volume_total: u64,
     clones: &Mutex<HashSet<u64>>,
     by_ext: &mut BTreeMap<String, ExtSum>,
+    errors: &AtomicU64,
 ) -> Node {
     let name = ent.name.to_string_lossy().into_owned();
     let symlink = ent.objtype == VLNK;
@@ -627,6 +651,7 @@ fn leaf_from_bulk(
         };
         (meta.len(), allocated_bytes(&meta), clone)
     } else {
+        errors.fetch_add(1, Ordering::Relaxed);
         (0, 0, None)
     };
     if !symlink {
@@ -665,7 +690,8 @@ fn walk_dir(
     scan_root: &Path,
     seen: &Mutex<HashSet<(u64, u64)>>,
     clones: &Mutex<HashSet<u64>>,
-) -> (Node, BTreeMap<String, ExtSum>) {
+    errors: &AtomicU64,
+) -> io::Result<(Node, BTreeMap<String, ExtSum>)> {
     walk_dir_known(
         path,
         meta.modified().ok(),
@@ -676,6 +702,7 @@ fn walk_dir(
         scan_root,
         seen,
         clones,
+        errors,
     )
 }
 
@@ -690,37 +717,45 @@ fn walk_dir_known(
     scan_root: &Path,
     seen: &Mutex<HashSet<(u64, u64)>>,
     clones: &Mutex<HashSet<u64>>,
-) -> (Node, BTreeMap<String, ExtSum>) {
+    errors: &AtomicU64,
+) -> io::Result<(Node, BTreeMap<String, ExtSum>)> {
     let _ = insert_seen(seen, dev, ino);
     let mut children = Vec::new();
     let mut by_ext: BTreeMap<String, ExtSum> = BTreeMap::new();
     let mut subdirs = Vec::new();
-    if let Ok(entries) = list_bulk(path) {
-        for ent in entries {
-            let child = path.join(&ent.name);
-            if is_hidden_data_mount(scan_root, &child) {
+    let entries = match list_bulk(path, errors) {
+        Ok(entries) => entries,
+        Err(err) if path == scan_root => return Err(err),
+        Err(_) => {
+            errors.fetch_add(1, Ordering::Relaxed);
+            Vec::new()
+        }
+    };
+    for ent in entries {
+        let child = path.join(&ent.name);
+        if is_hidden_data_mount(scan_root, &child) {
+            continue;
+        }
+        if ent.objtype == VDIR {
+            if !insert_seen(seen, ent.dev, ent.ino) {
                 continue;
             }
-            if ent.objtype == VDIR {
-                if !insert_seen(seen, ent.dev, ent.ino) {
-                    continue;
-                }
-                subdirs.push(Subdir {
-                    path: child,
-                    modified: ent.modified,
-                    created: ent.created,
-                    dev: ent.dev,
-                    ino: ent.ino,
-                });
-            } else {
-                children.push(leaf_from_bulk(
-                    child,
-                    &ent,
-                    volume_total,
-                    clones,
-                    &mut by_ext,
-                ));
-            }
+            subdirs.push(Subdir {
+                path: child,
+                modified: ent.modified,
+                created: ent.created,
+                dev: ent.dev,
+                ino: ent.ino,
+            });
+        } else {
+            children.push(leaf_from_bulk(
+                child,
+                &ent,
+                volume_total,
+                clones,
+                &mut by_ext,
+                errors,
+            ));
         }
     }
     let nested: Vec<(Node, BTreeMap<String, ExtSum>)> = subdirs
@@ -736,9 +771,10 @@ fn walk_dir_known(
                 scan_root,
                 seen,
                 clones,
+                errors,
             )
         })
-        .collect();
+        .collect::<io::Result<_>>()?;
     for (node, totals) in nested {
         merge_ext(&mut by_ext, totals);
         children.push(node);
@@ -750,7 +786,7 @@ fn walk_dir_known(
     let files = children
         .iter()
         .fold(0u64, |acc, c| acc.saturating_add(c.files));
-    (
+    Ok((
         Node {
             name: node_name(path),
             path: path.to_path_buf(),
@@ -765,7 +801,7 @@ fn walk_dir_known(
             children,
         },
         by_ext,
-    )
+    ))
 }
 
 fn merge_ext(into: &mut BTreeMap<String, ExtSum>, from: BTreeMap<String, ExtSum>) {

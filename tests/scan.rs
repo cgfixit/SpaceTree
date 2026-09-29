@@ -496,3 +496,92 @@ fn scan_root_under_system_volumes_is_still_walked() {
     assert_eq!(result.root.size, only_sz);
     assert_eq!(child(&result.root, "only.bin").size, only_sz);
 }
+
+struct DeniedDirectory(PathBuf);
+
+impl DeniedDirectory {
+    fn new(path: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        Self(path.to_path_buf())
+    }
+}
+
+impl Drop for DeniedDirectory {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+#[test]
+fn denied_root_fails_instead_of_reporting_empty() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("permission fixture requires an unprivileged user");
+        return;
+    }
+    let fix = build_fixture();
+    let _denied = DeniedDirectory::new(&fix.root);
+    assert_eq!(
+        scan(&fix.root).unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_spacetree"))
+        .arg("--scan")
+        .arg(&fix.root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("scan failed"));
+}
+
+#[test]
+fn denied_child_keeps_readable_siblings_and_reports_incomplete() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("permission fixture requires an unprivileged user");
+        return;
+    }
+    let fix = build_fixture();
+    let _denied = DeniedDirectory::new(&fix.root.join("nest"));
+    let result = scan(&fix.root).unwrap();
+    assert_eq!(result.error_count, 1);
+    assert_eq!(result.root.size, fix.alpha + fix.beta);
+    assert_eq!(result.root.logical, 8192 + 4096);
+    assert_eq!(result.root.files, 2);
+    assert_eq!(child(&result.root, "alpha.txt").size, fix.alpha);
+    assert!(child(&result.root, "nest").children.is_empty());
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_spacetree"))
+        .arg("--scan")
+        .arg(&fix.root)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("scan_incomplete_errors=1"));
+    assert!(text.contains("alpha.txt"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("scan incomplete: 1 read error"));
+}
+
+#[test]
+fn empty_directory_is_complete() {
+    let root = unique_dir();
+    let _guard = Fixture {
+        root: root.clone(),
+        alpha: 0,
+        beta: 0,
+        gamma: 0,
+    };
+    let result = scan(&root).unwrap();
+    assert_eq!(result.error_count, 0);
+    assert_eq!(result.root.size, 0);
+    assert!(result.root.children.is_empty());
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_spacetree"))
+        .arg("--scan")
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(out.stderr.is_empty());
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("incomplete"));
+}
