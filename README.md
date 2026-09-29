@@ -2,7 +2,7 @@
 
 SpaceTree is a macOS disk usage app. You pick a folder or a disk. The window lists each child and draws a treemap of the same allocated bytes.
 
-![CG Agent Harness running on macOS](/screenshots/SpaceTree-9.28.26.jpeg)
+![SpaceTree showing a synthetic folder scan with a table, extension legend, and treemap](/screenshots/SpaceTree-synthetic.jpeg)
 
 - The table columns are Name, Size Proportion, Percentage, Physical Size, Logical Size, and Files. Percentage is that row's allocated bytes divided by the scan root. The scan root is 100%.
 - The treemap draws one rectangle per file. Area is allocated size. Color is the file extension. A folder is a frame around its children. Double-click a folder to zoom in. Double-click a file to reveal it in Finder. Zoom out walks back to the parent, then to the scan root. A single click selects a row and does not zoom.
