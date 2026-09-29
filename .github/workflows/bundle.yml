@@ -43,6 +43,8 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-bundle-
 
       - name: Bundle
+        env:
+          CARGO_TARGET_DIR: target/bundle
         run: sh scripts/make-app.sh
 
       - name: Verify the bundle
