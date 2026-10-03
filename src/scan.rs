@@ -91,11 +91,26 @@ pub(crate) fn percent_of_disk(size: u64, volume_total: u64) -> f64 {
     }
 }
 
+/// Capacity of the volume that holds `path`, as Finder reports it.
+///
+/// macOS uses `statfs`: its block count is 64-bit. Darwin's `statvfs` stores
+/// `f_blocks` in a 32-bit `fsblkcnt_t`, which cannot describe a volume of
+/// 2^32 blocks or more (16 TiB at 4 KiB blocks).
 fn volume_total_bytes(path: &Path) -> u64 {
     let c = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
         Ok(c) => c,
         Err(_) => return 0,
     };
+    #[cfg(target_os = "macos")]
+    unsafe {
+        // SAFETY: `c` is a NUL-terminated path; `s` is a valid statfs out-param.
+        let mut s: libc::statfs = std::mem::zeroed();
+        if libc::statfs(c.as_ptr(), &mut s) != 0 {
+            return 0;
+        }
+        s.f_blocks.saturating_mul(u64::from(s.f_bsize))
+    }
+    #[cfg(not(target_os = "macos"))]
     unsafe {
         // SAFETY: `c` is a NUL-terminated path; `s` is a valid statvfs out-param.
         let mut s: libc::statvfs = std::mem::zeroed();
@@ -103,6 +118,17 @@ fn volume_total_bytes(path: &Path) -> u64 {
             return 0;
         }
         (s.f_blocks as u64).saturating_mul(s.f_frsize as u64)
+    }
+}
+
+/// `st_dev` as the bulk reader reports it. Darwin's `dev_t` is a signed
+/// 32-bit value; `MetadataExt::dev` sign-extends it while `ATTR_CMN_DEVID`
+/// is read as unsigned, so normalize both to the same 32 bits.
+fn dev_id(meta: &Metadata) -> u64 {
+    if cfg!(target_os = "macos") {
+        u64::from(meta.dev() as u32)
+    } else {
+        meta.dev()
     }
 }
 
@@ -696,7 +722,7 @@ fn walk_dir(
         path,
         meta.modified().ok(),
         meta.created().ok(),
-        meta.dev(),
+        dev_id(meta),
         meta.ino(),
         volume_total,
         scan_root,

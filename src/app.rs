@@ -13,8 +13,8 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::finder::reveal_in_finder;
 use crate::{
-    ext_color, ext_description, ext_label, format_scan_share, layout_node, legend_of, share_px,
-    sort_tree, LegendRow, Node, PxRect, ScanResult, SortColumn, Tiling,
+    ext_color, ext_description, ext_label, format_bytes, format_scan_share, layout_node, legend_of,
+    share_px, sort_tree, LegendRow, Node, PxRect, ScanResult, SortColumn, Tiling,
 };
 
 pub const APP_TITLE: &str = "SpaceTree";
@@ -263,17 +263,17 @@ impl eframe::App for SpaceTreeApp {
                 }
                 Phase::Ready => {
                     if let Some(result) = &self.result {
-                        ui.label(format!("walkable {}", human_size(result.root.size)))
+                        ui.label(format!("walkable {}", format_bytes(result.root.size)))
                             .on_hover_text(format!("{} bytes", result.root.size));
                         ui.separator();
-                        ui.label(format!("volume {}", human_size(result.volume_total)))
+                        ui.label(format!("volume {}", format_bytes(result.volume_total)))
                             .on_hover_text(format!("{} bytes", result.volume_total));
                         ui.separator();
                         ui.label(format_percent(result.root.percent_of_disk));
                         if let Some(sel) = &self.selected {
                             ui.separator();
                             if let Some(node) = find_node(&result.root, sel) {
-                                ui.label(format!("selected {}", human_size(node.size)))
+                                ui.label(format!("selected {}", format_bytes(node.size)))
                                     .on_hover_text(format!("{} bytes", node.size));
                             }
                             ui.label(sel.display().to_string());
@@ -493,7 +493,7 @@ impl SpaceTreeApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            ui.monospace(human_size(node.size))
+                                            ui.monospace(format_bytes(node.size))
                                                 .on_hover_text(format!("{} bytes", node.size));
                                         },
                                     );
@@ -502,7 +502,7 @@ impl SpaceTreeApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            ui.monospace(human_size(node.logical))
+                                            ui.monospace(format_bytes(node.logical))
                                                 .on_hover_text(format!("{} bytes", node.logical));
                                         },
                                     );
@@ -780,20 +780,6 @@ fn flatten<'a>(
 
 fn default_path() -> String {
     std::env::var("HOME").unwrap_or_else(|_| String::from("/"))
-}
-
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut v = bytes as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    format!("{v:.1} {}", UNITS[u])
 }
 
 fn format_percent(p: f64) -> String {

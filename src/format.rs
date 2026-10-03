@@ -33,6 +33,33 @@ fn push_node(out: &mut String, node: &Node, depth: usize) {
     }
 }
 
+/// Human size in decimal SI units (1 KB = 1000 bytes), the convention Finder,
+/// Disk Utility, and About This Mac have used since Mac OS X 10.6. Values
+/// under 10 keep two decimals; larger values keep one.
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let mut unit = 0;
+    let mut scale = 1u64;
+    while unit < UNITS.len() - 1 && bytes / scale >= 1000 {
+        scale *= 1000;
+        unit += 1;
+    }
+    let mut value = bytes as f64 / scale as f64;
+    // Rounding can carry 999.96 up to 1000.0; show the next unit instead.
+    if (value * 10.0).round() >= 10_000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if (value * 100.0).round() < 1000.0 {
+        format!("{value:.2} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 fn unix_secs(t: Option<SystemTime>) -> i64 {
     t.and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
