@@ -74,6 +74,39 @@ def bulk(dirpath):
     return out
 
 
+F_LOG2PHYS_EXT = 65
+
+
+class Log2Phys(ctypes.Structure):
+    _pack_ = 4
+    _fields_ = [("flags", ctypes.c_uint32), ("contig", ctypes.c_int64), ("devoffset", ctypes.c_int64)]
+
+
+def extents(p):
+    """[(file_off, dev_off, len)] from F_LOG2PHYS_EXT, or an error string."""
+    size = os.lstat(p).st_size
+    fd = os.open(p, os.O_RDONLY)
+    out, off, calls = [], 0, 0
+    libc.fcntl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+    try:
+        while off < size:
+            l2p = Log2Phys(0, size - off, off)
+            calls += 1
+            if libc.fcntl(fd, F_LOG2PHYS_EXT, ctypes.byref(l2p)) == -1:
+                out.append(("err", off, os.strerror(ctypes.get_errno())))
+                off += 4096
+                if calls > 64:
+                    break
+                continue
+            out.append((off, l2p.devoffset, l2p.contig))
+            if l2p.contig <= 0:
+                break
+            off += l2p.contig
+    finally:
+        os.close(fd)
+    return out
+
+
 def alloc(p):
     return os.lstat(p).st_blocks * 512
 
@@ -107,6 +140,10 @@ try:
     overwrite(f"{d}/c", 0, 4096)
     d = os.path.join(root, "origgone"); os.mkdir(d); s["clone, original deleted"] = d
     write(f"{d}/a", 8 * MiB); run("cp", "-c", f"{d}/a", f"{d}/b"); os.remove(f"{d}/a")
+    d = os.path.join(root, "sparse"); os.mkdir(d); s["sparse 64 MiB with 2 data runs, cloned, b rewrote 4 KiB"] = d
+    with open(f"{d}/a", "wb") as f:
+        f.write(os.urandom(1 * MiB)); f.seek(48 * MiB); f.write(os.urandom(1 * MiB)); f.truncate(64 * MiB)
+    run("cp", "-c", f"{d}/a", f"{d}/b"); overwrite(f"{d}/b", 48 * MiB, 4096)
     d = os.path.join(root, "plain"); os.mkdir(d); s["plain file"] = d
     write(f"{d}/a", 2 * MiB)
     d = os.path.join(root, "hardlink"); os.mkdir(d); s["hard link pair"] = d
@@ -118,6 +155,8 @@ try:
         for n in sorted(os.listdir(d)):
             p = f"{d}/{n}"
             print(f"   {n}: alloc={alloc(p)} single={single(p)} bulk={b.get(n)}")
+            ex = extents(p)
+            print(f"      extents({len(ex)}): {ex[:6]}{' ...' if len(ex) > 6 else ''}")
 finally:
     shutil.rmtree(root, ignore_errors=True)
 sdk = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True, text=True).stdout.strip()
