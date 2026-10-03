@@ -52,3 +52,7 @@ jobs:
       - name: Check sizes against stat, du, and df
         if: runner.os == 'macOS'
         run: ./scripts/verify-macos-sizes.sh target/debug/spacetree
+
+      - name: Probe APFS clone attributes (temporary)
+        if: runner.os == 'macOS'
+        run: python3 scripts/probe-apfs-clones.py
