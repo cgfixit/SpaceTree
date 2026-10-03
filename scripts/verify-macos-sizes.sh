@@ -1,7 +1,7 @@
 #!/bin/sh
 # Check SpaceTree's size accounting against macOS's own tools on a synthetic
-# APFS tree. Asserts what has a ground truth (stat, du, df) and prints what
-# does not (hard links, partially rewritten clones) so the CI log records it.
+# APFS tree. Asserts what has a ground truth (stat, du, df, clone sharing)
+# and prints what does not (hard links, symlinks) so the CI log records it.
 set -eu
 bin=${1:-./target/debug/spacetree}
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -40,7 +40,7 @@ mkdir -p "$plain"
 printf 'x' > "$plain/one.txt"
 head -c 1048576 /dev/urandom > "$plain/rand.bin"
 dd if=/dev/zero of="$plain/sparse.img" bs=1 count=1 seek=104857599 2>/dev/null
-yes spacetree | head -c 4194304 > "$root/compressible.txt"
+yes spacetree 2>/dev/null | head -c 4194304 > "$root/compressible.txt"
 ditto --hfsCompression "$root/compressible.txt" "$plain/compressed.txt"
 rm "$root/compressible.txt"
 printf 'data' > "$plain/forked.txt"
@@ -90,6 +90,9 @@ printf 'info  hard link pair: first=%s second=%s total=%s du=%s\n' \
   "$(row "$lout" first.bin)" "$(row "$lout" second.bin)" \
   "$(printf '%s\n' "$lout" | awk -F= '/^root_size_bytes=/{print $2}')" "$(du_bytes "$links")"
 
+# A clone rewritten in part gets a new clone id but still shares the rest of
+# its blocks. Expect one copy plus the rewritten bytes (APFS may rewrite up to
+# 64 KiB around them), where du counts both copies in full.
 partial="$root/partial"
 mkdir -p "$partial"
 head -c 8388608 /dev/urandom > "$partial/base.bin"
@@ -97,9 +100,15 @@ cp -c "$partial/base.bin" "$partial/edited.bin"
 dd if=/dev/urandom of="$partial/edited.bin" bs=4096 count=1 conv=notrunc 2>/dev/null
 sync
 pout=$("$bin" --scan "$partial")
-printf 'info  clone with one 4 KiB block rewritten: base=%s edited=%s total=%s (one copy is %s)\n' \
-  "$(row "$pout" base.bin)" "$(row "$pout" edited.bin)" \
-  "$(printf '%s\n' "$pout" | awk -F= '/^root_size_bytes=/{print $2}')" "$(alloc "$partial/base.bin")"
+ptotal=$(printf '%s\n' "$pout" | awk -F= '/^root_size_bytes=/{print $2}')
+one=$(alloc "$partial/base.bin")
+if [ "$ptotal" -ge $((one + 4096)) ] && [ "$ptotal" -le $((one + 4096 + 65536)) ]; then
+  printf 'ok    %-34s %s (one copy %s, du %s)\n' "rewritten clone shares blocks" "$ptotal" "$one" "$(du_bytes "$partial")"
+else
+  printf 'FAIL  %-34s got %s, want %s + 4 KiB..68 KiB\n' "rewritten clone shares blocks" "$ptotal" "$one"
+  fail=1
+fi
+printf 'info  rewritten clone pair: base=%s edited=%s\n' "$(row "$pout" base.bin)" "$(row "$pout" edited.bin)"
 
 if [ "$fail" -ne 0 ]; then
   echo "verify-macos-sizes: FAILED" >&2

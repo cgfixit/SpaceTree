@@ -8,7 +8,7 @@ SpaceTree is a macOS disk usage app. You pick a folder or a disk. The window lis
 - The treemap draws one rectangle per file. Area is allocated size. Color is the file extension. Each folder is outlined around its files; large folders carry a name and size label, and large files show their name and size. Hover a tile for its size, kind, and share of the view and of the scan. Double-click a folder (or its label) to zoom in. Double-click a file to reveal it in Finder. The bar above the map shows the path you are in; click any part of it to jump back, or press Esc or Zoom out to go up one level. A single click selects a row and does not zoom; selecting a folder in the table outlines it in the map.
 - The legend lists the extension colors in the current scan with each one's size and share. Hover a legend row to highlight that extension in the map.
 
-Physical Size is allocated bytes (`st_blocks * 512`). Logical Size is `st_size`. Sizes use decimal units, as Finder does (1 GB = 1,000,000,000 bytes); hover a size for the exact byte count. The volume size is the capacity `statfs` reports, the same figure `df` shows. A directory's size is the sum of its children. An APFS clone keeps its allocated bytes on the first file seen and counts as zero after that. The walk does not follow a child symlink. It skips `/System/Volumes` unless that path is the scan root, so the Data volume is not counted twice.
+Physical Size is allocated bytes (`st_blocks * 512`). Logical Size is `st_size`. Sizes use decimal units, as Finder does (1 GB = 1,000,000,000 bytes); hover a size for the exact byte count. The volume size is the capacity `statfs` reports, the same figure `df` shows. A directory's size is the sum of its children. APFS clones share their blocks, and the scan counts each shared block once: a pure clone (`cp -c`, Finder Duplicate) counts as zero after the first file seen, and a clone later edited in part counts only the blocks it no longer shares. `du` counts every clone in full. The walk does not follow a child symlink. It skips `/System/Volumes` unless that path is the scan root, so the Data volume is not counted twice.
 
 ## Requirements
 
@@ -16,7 +16,7 @@ Physical Size is allocated bytes (`st_blocks * 512`). Logical Size is `st_size`.
 - Rust. `Cargo.toml` records `rust-version` 1.85.0. The pinned `eframe` 0.31.1 crates need a newer compiler. Homebrew rustc 1.98 builds this tree.
 - Xcode Command Line Tools, for linking and `codesign`.
 
-`cargo test` also builds on Linux. That build reads directories with ordinary file metadata. It does not read APFS clone ids.
+`cargo test` also builds on Linux. That build reads directories with ordinary file metadata. It does not read APFS clone ids or shared extents.
 
 ## Build and run
 

@@ -477,6 +477,73 @@ fn apfs_clones_count_allocated_once() {
     );
 }
 
+/// Clone `a` to `b` with clonefile(2), then rewrite `rewrite` bytes at the start of `b`.
+#[cfg(target_os = "macos")]
+fn clone_then_rewrite(a: &Path, b: &Path, rewrite: usize) {
+    use std::ffi::CString;
+    use std::io::{Seek, SeekFrom};
+    use std::os::unix::ffi::OsStrExt;
+    let src = CString::new(a.as_os_str().as_bytes()).unwrap();
+    let dst = CString::new(b.as_os_str().as_bytes()).unwrap();
+    let rc = unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), 0) };
+    assert_eq!(
+        rc,
+        0,
+        "clonefile failed: {}",
+        std::io::Error::last_os_error()
+    );
+    let mut f = fs::OpenOptions::new().write(true).open(b).unwrap();
+    f.seek(SeekFrom::Start(0)).unwrap();
+    f.write_all(&vec![b'y'; rewrite]).unwrap();
+    f.sync_all().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn partly_rewritten_clones_count_shared_blocks_once() {
+    // A rewritten clone gets a new clone id but still shares the untouched
+    // blocks. Counting both files in full would double those blocks.
+    const SLACK: u64 = 64 * 1024; // APFS may rewrite more than the bytes written
+    for rewrite in [4096usize, 4 * 1024 * 1024] {
+        let root = unique_dir();
+        let _g = Fixture {
+            root: root.clone(),
+            alpha: 0,
+            beta: 0,
+            gamma: 0,
+        };
+        fs::create_dir(root.join("orig")).unwrap();
+        fs::create_dir(root.join("copy")).unwrap();
+        let a = root.join("orig/a.bin");
+        let b = root.join("copy/b.bin");
+        let mut f = File::create(&a).unwrap();
+        for i in 0..8u8 {
+            f.write_all(&vec![i.wrapping_mul(37).wrapping_add(1); 1024 * 1024])
+                .unwrap();
+        }
+        f.sync_all().unwrap();
+        drop(f);
+        clone_then_rewrite(&a, &b, rewrite);
+        let one = allocated(&a);
+        assert_eq!(allocated(&b), one, "a clone allocates like its source");
+        let result = scan(&root).unwrap();
+        let total = result.root.size;
+        let rewritten = rewrite as u64;
+        assert!(
+            total >= one + rewritten && total <= one + rewritten + SLACK,
+            "rewrite {rewrite}: total {total}, want one copy {one} + about {rewritten}"
+        );
+        let orig = child(&result.root, "orig").size;
+        let copy = child(&result.root, "copy").size;
+        assert_eq!(orig + copy, total);
+        assert!(
+            orig.min(copy) <= rewritten + SLACK,
+            "rewrite {rewrite}: one folder keeps the shared blocks, the other only its own (orig {orig}, copy {copy})"
+        );
+        assert_eq!(result.error_count, 0);
+    }
+}
+
 #[test]
 fn scan_root_under_system_volumes_is_still_walked() {
     let root = unique_dir();
