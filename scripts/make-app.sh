@@ -24,6 +24,18 @@ OUT="$APP/Contents/MacOS/spacetree"
 cp "$BIN" "$OUT"
 chmod +x "$OUT"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+
+# AppIcon.icns from the 1024 px master, at every size Finder and the Dock ask for.
+ICONSET="$DIST/AppIcon.iconset"
+rm -rf "$ICONSET"
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" "$ROOT/assets/AppIcon.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  double=$((size * 2))
+  sips -z "$double" "$double" "$ROOT/assets/AppIcon.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+rm -rf "$ICONSET"
 codesign --force --sign - "$APP"
 echo "built $APP"
 lipo -info "$OUT" || true

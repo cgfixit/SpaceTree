@@ -1,0 +1,212 @@
+name: auto-release
+
+# Publish the bundled app for the newest commit on main once every check on
+# that commit has passed. A bundle run finishing on main triggers it at once;
+# the schedule retries every three hours for checks that finish later, so a
+# green merge is released well within 24 hours. A newer merge supersedes an
+# unreleased older one, since the newer bundle contains it.
+
+on:
+  workflow_run:
+    workflows: [bundle]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "23 */3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: auto-release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      statuses: read
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      sha: ${{ steps.decide.outputs.sha }}
+      tag: ${{ steps.decide.outputs.tag }}
+      version: ${{ steps.decide.outputs.version }}
+      bundle_run: ${{ steps.decide.outputs.bundle_run }}
+    steps:
+      - name: Decide whether main's head is releasable
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Check runs that must exist on the commit before it can ship.
+          REQUIRED: |
+            test (macos-latest)
+            test (ubuntu-latest)
+            SpaceTree.app
+            cargo-deny
+            gitleaks
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          say() { printf '%s\n' "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          hold() { say "No release: $*"; echo "release=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          sha="$(gh api "repos/$repo/commits/main" --jq .sha)"
+          case "$sha" in
+            *[!0-9a-f]*|"") echo "bad sha from the API" >&2; exit 1 ;;
+          esac
+          test "${#sha}" -eq 40
+          short="${sha:0:7}"
+
+          version="$(gh api "repos/$repo/contents/Cargo.toml?ref=$sha" --jq .content \
+            | base64 -d | awk -F'"' '/^version = /{print $2; exit}')"
+          printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+          day="$(gh api "repos/$repo/commits/$sha" --jq .commit.committer.date | cut -c1-10 | tr -d -)"
+          tag="v${version}-main.${day}.${short}"
+
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            hold "$tag is already released."
+          fi
+
+          runs="$(gh api --paginate "repos/$repo/commits/$sha/check-runs?per_page=100" \
+            --jq '.check_runs[] | {name, status, conclusion}' | jq -s \
+            '[.[] | select((.name | startswith("auto-release")) | not)
+                  | select(.name != "publish bundled app")]')"
+          if [ "$(printf '%s' "$runs" | jq length)" = "0" ]; then
+            hold "no checks have reported on $short yet."
+          fi
+          while IFS= read -r need; do
+            [ -n "$need" ] || continue
+            if [ "$(printf '%s' "$runs" | jq --arg n "$need" '[.[] | select(.name == $n)] | length')" = "0" ]; then
+              hold "required check '$need' has not reported on $short yet."
+            fi
+          done <<< "$REQUIRED"
+          pending="$(printf '%s' "$runs" | jq -r '.[] | select(.status != "completed") | .name')"
+          if [ -n "$pending" ]; then
+            hold "still running on $short: $(printf '%s' "$pending" | paste -sd, -)."
+          fi
+          failed="$(printf '%s' "$runs" | jq -r \
+            '.[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")
+                 | "\(.name)=\(.conclusion)"')"
+          if [ -n "$failed" ]; then
+            hold "checks did not pass on $short: $(printf '%s' "$failed" | paste -sd, -)."
+          fi
+          statuses="$(gh api "repos/$repo/commits/$sha/status" --jq '"\(.total_count) \(.state)"')"
+          if [ "${statuses%% *}" != "0" ] && [ "${statuses#* }" != "success" ]; then
+            hold "commit statuses on $short are ${statuses#* }."
+          fi
+
+          bundle_run="$(gh run list --repo "$repo" --workflow bundle.yml --commit "$sha" \
+            --status success --json databaseId,event \
+            --jq '[.[] | select(.event == "push")][0].databaseId // empty')"
+          if [ -z "$bundle_run" ]; then
+            hold "no successful push bundle run for $short."
+          fi
+
+          say "Releasing $short as $tag from bundle run $bundle_run."
+          {
+            echo "release=true"
+            echo "sha=$sha"
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "bundle_run=$bundle_run"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: auto-release publish
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout the released commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+
+      - name: Download and verify the bundle
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.gate.outputs.bundle_run }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          dest="${RUNNER_TEMP}/bundle"
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name spacetree-app --dir "$dest"
+          zip="$(find "$dest" -type f -name 'SpaceTree-macos-*.zip')"
+          if [ "$(printf '%s\n' "$zip" | wc -l | tr -d ' ')" != "1" ] || [ ! -f "$zip" ]; then
+            echo "expected exactly one app zip" >&2
+            exit 1
+          fi
+          unpack="${RUNNER_TEMP}/verify-app"
+          rm -rf "$unpack"
+          mkdir -p "$unpack"
+          ditto -x -k "$zip" "$unpack"
+          app="$unpack/SpaceTree.app"
+          test -x "$app/Contents/MacOS/spacetree"
+          test "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" = "com.cgfixit.spacetree"
+          plist_version="$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")"
+          if [ "$plist_version" != "$VERSION" ]; then
+            echo "Info.plist $plist_version does not match Cargo.toml $VERSION" >&2
+            exit 1
+          fi
+          codesign --verify --verbose=2 "$app"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          TAG: ${{ needs.gate.outputs.tag }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          RUN_ID: ${{ needs.gate.outputs.bundle_run }}
+          ZIP: ${{ steps.verify.outputs.zip }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          if gh release view "$TAG" --repo "$repo" >/dev/null 2>&1; then
+            echo "$TAG already exists; nothing to do."
+            exit 0
+          fi
+          base="$(basename "$ZIP" .zip)"
+          arch="${base##*-}"
+          short="${SHA:0:7}"
+          asset="${RUNNER_TEMP}/SpaceTree-${VERSION}-main.${short}-macos-${arch}.app.zip"
+          cp "$ZIP" "$asset"
+          prev="$(gh release list --repo "$repo" --limit 50 --json tagName \
+            --jq '[.[] | select(.tagName | test("-main\\.[0-9]{8}\\.[0-9a-f]{7}$"))][0].tagName // empty')"
+          notes="${RUNNER_TEMP}/notes.md"
+          {
+            printf 'SpaceTree %s for macOS (%s), built from main at %s.\n\n' "$VERSION" "$arch" "$SHA"
+            printf 'Published automatically after every check on this commit passed.\n'
+            printf 'Bundle run: %s/%s/actions/runs/%s\n\n' "$GITHUB_SERVER_URL" "$repo" "$RUN_ID"
+            printf 'Ad-hoc signed with codesign --sign -. Not notarized.\n'
+            printf 'First launch: right-click SpaceTree.app and choose Open.\n\n'
+            if [ -n "$prev" ]; then
+              gh api "repos/$repo/releases/generate-notes" -f tag_name="$TAG" \
+                -f target_commitish="$SHA" -f previous_tag_name="$prev" --jq .body
+            else
+              gh api "repos/$repo/releases/generate-notes" -f tag_name="$TAG" \
+                -f target_commitish="$SHA" --jq .body
+            fi
+          } > "$notes"
+          gh release create "$TAG" "$asset" \
+            --repo "$repo" \
+            --target "$SHA" \
+            --title "SpaceTree $VERSION (main $short)" \
+            --notes-file "$notes" \
+            --latest
+          {
+            echo "Published [$TAG]($GITHUB_SERVER_URL/$repo/releases/tag/$TAG)."
+          } >> "$GITHUB_STEP_SUMMARY"

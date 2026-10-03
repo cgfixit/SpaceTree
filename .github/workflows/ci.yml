@@ -48,3 +48,7 @@ jobs:
 
       - name: Boot the scanner
         run: ./scripts/ci-runtime.sh target/debug/spacetree
+
+      - name: Check sizes against stat, du, and df
+        if: runner.os == 'macOS'
+        run: ./scripts/verify-macos-sizes.sh target/debug/spacetree

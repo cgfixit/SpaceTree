@@ -56,6 +56,13 @@ jobs:
           test "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" = "com.cgfixit.spacetree"
           codesign --verify --verbose=2 "$app"
           lipo -info "$bin" | grep -q "$(uname -m)"
+          test "$(plutil -extract CFBundleIconFile raw "$app/Contents/Info.plist")" = "AppIcon"
+          icns="$app/Contents/Resources/AppIcon.icns"
+          test -s "$icns"
+          rm -rf "${RUNNER_TEMP}/AppIcon.iconset"
+          iconutil -c iconset -o "${RUNNER_TEMP}/AppIcon.iconset" "$icns"
+          test "$(sips -g pixelWidth "${RUNNER_TEMP}/AppIcon.iconset/icon_512x512@2x.png" | awk '/pixelWidth/{print $2}')" = "1024"
+          test "$(sips -g pixelWidth "${RUNNER_TEMP}/AppIcon.iconset/icon_16x16.png" | awk '/pixelWidth/{print $2}')" = "16"
 
       - name: Zip the app
         run: |

@@ -13,8 +13,8 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::finder::reveal_in_finder;
 use crate::{
-    ext_color, ext_description, ext_label, format_scan_share, layout_node, legend_of, share_px,
-    sort_tree, LegendRow, Node, PxRect, ScanResult, SortColumn, Tiling,
+    ext_color, ext_description, ext_label, format_bytes, format_scan_share, layout_node, legend_of,
+    share_px, sort_tree, LegendRow, Node, PxRect, ScanResult, SortColumn, Tiling,
 };
 
 pub const APP_TITLE: &str = "SpaceTree";
@@ -57,6 +57,8 @@ struct SpaceTreeApp {
     generation: u64,
     map_cache: Option<MapCache>,
     zoom: Option<PathBuf>,
+    /// Extension key under the pointer in the legend; the map dims the rest.
+    legend_hover: Option<String>,
 }
 
 impl SpaceTreeApp {
@@ -79,6 +81,7 @@ impl SpaceTreeApp {
             generation: 0,
             map_cache: None,
             zoom: None,
+            legend_hover: None,
         }
     }
 
@@ -159,12 +162,18 @@ impl SpaceTreeApp {
     }
 }
 
+/// SpaceTree's Dock icon. eframe replaces the bundle icon at runtime with its
+/// own default unless the app supplies one.
+const APP_ICON_PNG: &[u8] = include_bytes!("../assets/AppIcon.png");
+
 pub fn run() -> eframe::Result<()> {
+    let icon = eframe::icon_data::from_png_bytes(APP_ICON_PNG).unwrap_or_default();
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 780.0])
             .with_min_inner_size([800.0, 500.0])
-            .with_title(APP_TITLE),
+            .with_title(APP_TITLE)
+            .with_icon(icon),
         ..Default::default()
     };
     eframe::run_native(
@@ -191,6 +200,9 @@ impl eframe::App for SpaceTreeApp {
             }
             if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::O)) {
                 self.reveal_selected();
+            }
+            if self.zoom.is_some() && ctx.input(|i| i.key_pressed(Key::Escape)) {
+                self.zoom_out();
             }
         }
         let enter = ctx.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.command);
@@ -263,17 +275,17 @@ impl eframe::App for SpaceTreeApp {
                 }
                 Phase::Ready => {
                     if let Some(result) = &self.result {
-                        ui.label(format!("walkable {}", human_size(result.root.size)))
+                        ui.label(format!("walkable {}", format_bytes(result.root.size)))
                             .on_hover_text(format!("{} bytes", result.root.size));
                         ui.separator();
-                        ui.label(format!("volume {}", human_size(result.volume_total)))
+                        ui.label(format!("volume {}", format_bytes(result.volume_total)))
                             .on_hover_text(format!("{} bytes", result.volume_total));
                         ui.separator();
                         ui.label(format_percent(result.root.percent_of_disk));
                         if let Some(sel) = &self.selected {
                             ui.separator();
                             if let Some(node) = find_node(&result.root, sel) {
-                                ui.label(format!("selected {}", human_size(node.size)))
+                                ui.label(format!("selected {}", format_bytes(node.size)))
                                     .on_hover_text(format!("{} bytes", node.size));
                             }
                             ui.label(sel.display().to_string());
@@ -395,9 +407,9 @@ impl SpaceTreeApp {
             let mut header = |ui: &mut egui::Ui, col: SortColumn, label: &str, show_mark: bool| {
                 let mark = if show_mark && self.sort == col {
                     if self.descending {
-                        " ▾"
+                        " ⏷"
                     } else {
-                        " ▴"
+                        " ⏶"
                     }
                 } else {
                     ""
@@ -454,7 +466,7 @@ impl SpaceTreeApp {
                                     ui.add_space(depth as f32 * 14.0);
                                     if node.is_dir {
                                         let open = self.expanded.contains(&node.path);
-                                        let tri = if open { "▾" } else { "▸" };
+                                        let tri = if open { "⏷" } else { "⏵" };
                                         let r = ui.add(
                                             Label::new(format!("{tri}  {}", node.name))
                                                 .sense(Sense::click())
@@ -493,7 +505,7 @@ impl SpaceTreeApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            ui.monospace(human_size(node.size))
+                                            ui.monospace(format_bytes(node.size))
                                                 .on_hover_text(format!("{} bytes", node.size));
                                         },
                                     );
@@ -502,7 +514,7 @@ impl SpaceTreeApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            ui.monospace(human_size(node.logical))
+                                            ui.monospace(format_bytes(node.logical))
                                                 .on_hover_text(format!("{} bytes", node.logical));
                                         },
                                     );
@@ -580,148 +592,383 @@ impl SpaceTreeApp {
         }
     }
 
-    fn legend_panel(&self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Extension").strong());
+    fn legend_panel(&mut self, ui: &mut egui::Ui) {
+        let root_size = self.result.as_ref().map_or(0, |r| r.root.size);
+        let mut hovered = None;
+        ui.label(egui::RichText::new("Extension").strong())
+            .on_hover_text("Hover a row to highlight its tiles in the map");
         ScrollArea::vertical()
             .id_salt("ext-legend")
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show(ui, |ui| {
                 for row in &self.legend {
-                    ui.horizontal(|ui| {
-                        let (swatch, _) =
-                            ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-                        let rgb = ext_color(&row.key);
-                        ui.painter().rect_filled(
-                            swatch,
-                            2.0,
-                            Color32::from_rgb(rgb.r, rgb.g, rgb.b),
+                    let r = ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            let (swatch, _) =
+                                ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                            let rgb = ext_color(&row.key);
+                            ui.painter().rect_filled(
+                                swatch,
+                                3.0,
+                                Color32::from_rgb(rgb.r, rgb.g, rgb.b),
+                            );
+                            ui.add(Label::new(ext_label(&row.key)).truncate());
+                        });
+                        ui.add(
+                            Label::new(
+                                egui::RichText::new(format!(
+                                    "{}  ·  {}",
+                                    format_bytes(row.physical),
+                                    format_scan_share(row.physical, root_size)
+                                ))
+                                .monospace()
+                                .small(),
+                            )
+                            .truncate(),
                         );
-                        ui.add(Label::new(ext_label(&row.key)).truncate());
+                        ui.add(
+                            Label::new(egui::RichText::new(ext_description(&row.key)).weak())
+                                .truncate(),
+                        );
                     });
-                    ui.add(Label::new(ext_description(&row.key)).truncate());
+                    if ui.rect_contains_pointer(r.response.rect) {
+                        hovered = Some(row.key.clone());
+                        ui.painter().rect_stroke(
+                            r.response.rect.expand(2.0),
+                            3.0,
+                            Stroke::new(1.0_f32, ui.visuals().widgets.hovered.bg_stroke.color),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
                     ui.add_space(4.0);
                 }
             });
+        self.legend_hover = hovered;
     }
 
     fn treemap(&mut self, ui: &mut egui::Ui) {
+        let Some(result) = &self.result else {
+            return;
+        };
+        let root_size = result.root.size;
+        let focus = self.map_focus(&result.root);
+        let focus_path = focus.path.clone();
+        let focus_size = focus.size;
+        let focus_files = focus.files;
+        let crumbs = breadcrumbs(&result.root, &focus_path);
+
+        let mut go_to: Option<Option<PathBuf>> = None;
+        let header_h = 26.0;
+        let (header, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), header_h), Sense::hover());
+        ui.allocate_new_ui(
+            egui::UiBuilder::new().max_rect(header.shrink2(egui::vec2(4.0, 0.0))),
+            |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let zoomed = self.zoom.is_some();
+                    if ui
+                        .add_enabled(zoomed, egui::Button::new("⬆ Zoom out"))
+                        .on_hover_text("Back to the parent folder (Esc)")
+                        .clicked()
+                    {
+                        go_to = Some(None);
+                    }
+                    ui.separator();
+                    let last = crumbs.len().saturating_sub(1);
+                    for (i, (path, name)) in crumbs.iter().enumerate() {
+                        if i > 0 {
+                            ui.label(egui::RichText::new("›").weak());
+                        }
+                        let text = egui::RichText::new(name);
+                        let text = if i == last { text.strong() } else { text };
+                        if ui
+                            .add(egui::Button::new(text).frame(false))
+                            .on_hover_text(path.display().to_string())
+                            .clicked()
+                            && i != last
+                        {
+                            go_to = Some(Some(path.clone()));
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}  ·  {} of scan  ·  {} files",
+                                format_bytes(focus_size),
+                                format_scan_share(focus_size, root_size),
+                                focus_files
+                            ))
+                            .monospace()
+                            .weak(),
+                        );
+                    });
+                });
+            },
+        );
+        if let Some(target) = go_to {
+            match target {
+                None => self.zoom_out(),
+                Some(path) => {
+                    let is_root = self.result.as_ref().is_some_and(|r| r.root.path == path);
+                    self.zoom = if is_root { None } else { Some(path) };
+                    self.map_cache = None;
+                }
+            }
+            ui.ctx().request_repaint();
+            return;
+        }
+
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click());
         let bounds = px_from_rect(rect);
-        let rebuilt = {
-            let Some(result) = &self.result else {
-                return;
-            };
-            let focus = self.map_focus(&result.root);
-            let stale = self.map_cache.as_ref().is_none_or(|cache| {
-                cache.generation != self.generation
-                    || cache.focus != focus.path
-                    || cache.bounds != bounds
-            });
-            if stale {
-                Some((focus.path.clone(), layout_node(focus, bounds)))
-            } else {
-                None
-            }
-        };
-        if let Some((focus, tiling)) = rebuilt {
-            self.map_cache = Some(MapCache {
-                generation: self.generation,
-                focus,
-                bounds,
-                tiling,
-            });
-        }
-        let paints: Vec<(PxRect, Color32, bool, bool)> = {
-            let Some(cache) = &self.map_cache else {
-                return;
-            };
-            cache
-                .tiling
-                .tiles()
-                .iter()
-                .map(|tile| {
-                    let rgb = ext_color(&tile.color_ext);
-                    let selected = self.selected.as_deref() == Some(tile.path.as_path());
-                    (
-                        tile.rect,
-                        Color32::from_rgb(rgb.r, rgb.g, rgb.b),
-                        selected,
-                        tile.merged,
-                    )
-                })
-                .collect()
-        };
         let painter = ui.painter().with_clip_rect(rect);
-        for (tile, color, selected, merged) in &paints {
-            let full = screen_rect(*tile);
-            let paint = if tile.w > 2 && tile.h > 2 {
-                full.shrink(1.0)
+        painter.rect_filled(rect, 0.0, MAP_BG);
+        if focus_size == 0 {
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "No allocated bytes to draw here",
+                FontId::proportional(14.0),
+                ui.visuals().weak_text_color(),
+            );
+            return;
+        }
+        let stale = self.map_cache.as_ref().is_none_or(|cache| {
+            cache.generation != self.generation
+                || cache.focus != focus_path
+                || cache.bounds != bounds
+        });
+        if stale {
+            let tiling = self
+                .result
+                .as_ref()
+                .map(|r| layout_node(self.map_focus(&r.root), bounds));
+            if let Some(tiling) = tiling {
+                self.map_cache = Some(MapCache {
+                    generation: self.generation,
+                    focus: focus_path.clone(),
+                    bounds,
+                    tiling,
+                });
+            }
+        }
+        let Some(cache) = &self.map_cache else {
+            return;
+        };
+        let tiling = &cache.tiling;
+        let pointer = response.hover_pos().filter(|p| rect.contains(*p));
+        let (px, py) = pointer
+            .map(|p| (p.x.floor() as i32, p.y.floor() as i32))
+            .unwrap_or((i32::MIN, i32::MIN));
+        let hovered_tile = pointer.and_then(|_| tiling.hit_tile(px, py));
+        let hovered_top = pointer.and_then(|_| tiling.frames_at(px, py).find(|f| f.depth == 1));
+        let selected = self.selected.as_deref();
+        let legend_key = self.legend_hover.as_deref();
+
+        // Tiles: allocated-byte area, extension color, soft top-left light.
+        for tile in tiling.tiles() {
+            let full = screen_rect(tile.rect);
+            let paint = if tile.rect.w > 3 && tile.rect.h > 3 {
+                full.shrink(0.5)
             } else {
                 full
             };
-            if *merged {
-                paint_other(&painter, paint);
-            } else if paint.width() >= 8.0 && paint.height() >= 8.0 {
-                paint_cushion(&painter, paint, *color);
-            } else if paint.width() > 0.0 && paint.height() > 0.0 {
-                painter.rect_filled(paint, 0.0, *color);
+            if tile.merged {
+                paint_other(&painter, paint, tile.weight);
+                continue;
             }
-            painter.rect_stroke(
-                full,
-                0.0,
-                Stroke::new(1.0_f32, Color32::from_rgb(18, 18, 18)),
-                egui::StrokeKind::Inside,
+            let rgb = ext_color(&tile.color_ext);
+            let mut color = Color32::from_rgb(rgb.r, rgb.g, rgb.b);
+            if legend_key.is_some_and(|k| k != tile.color_ext) {
+                color = mix(color, MAP_BG, 0.72);
+            }
+            if paint.width() >= 6.0 && paint.height() >= 6.0 {
+                paint_cushion(&painter, paint, color);
+            } else if paint.width() > 0.0 && paint.height() > 0.0 {
+                painter.rect_filled(paint, 0.0, color);
+            }
+        }
+
+        // Folder outlines: strong for the focus's children, light for grandchildren.
+        for frame in tiling.frames() {
+            let r = screen_rect(frame.rect);
+            match frame.depth {
+                1 => {
+                    painter.rect_stroke(
+                        r,
+                        0.0,
+                        Stroke::new(2.0_f32, FRAME_LINE),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                2 => {
+                    painter.rect_stroke(
+                        r,
+                        0.0,
+                        Stroke::new(1.0_f32, FRAME_LINE.gamma_multiply(0.55)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // Labels: folder name and size in a pill; large files get name and size.
+        let mut pills: Vec<(egui::Rect, &Path)> = Vec::new();
+        for frame in tiling.frames().iter().filter(|f| f.depth == 1) {
+            if frame.rect.w < 72 || frame.rect.h < 30 {
+                continue;
+            }
+            let r = screen_rect(frame.rect);
+            let galley = one_line(
+                &painter,
+                format!("{}  {}", file_name(&frame.path), format_bytes(frame.weight)),
+                FontId::proportional(12.0),
+                Color32::WHITE,
+                r.width() - 14.0,
             );
-            if *selected {
+            let pill = egui::Rect::from_min_size(
+                r.left_top() + egui::vec2(3.0, 3.0),
+                galley.size() + egui::vec2(10.0, 4.0),
+            );
+            let hot = hovered_top.is_some_and(|f| f.path == frame.path);
+            painter.rect_filled(pill, 4.0, if hot { PILL_HOT } else { PILL_BG });
+            painter.galley(pill.min + egui::vec2(5.0, 2.0), galley, Color32::WHITE);
+            pills.push((pill, frame.path.as_path()));
+        }
+        for tile in tiling.tiles() {
+            if tile.merged || tile.rect.w < 64 || tile.rect.h < 30 {
+                continue;
+            }
+            let r = screen_rect(tile.rect).shrink(5.0);
+            let rgb = ext_color(&tile.color_ext);
+            let ink = if luminance(rgb.r, rgb.g, rgb.b) > 150.0 {
+                Color32::from_rgb(22, 24, 30)
+            } else {
+                Color32::WHITE
+            };
+            let name = one_line(
+                &painter,
+                file_name(&tile.path),
+                FontId::proportional(12.0),
+                ink,
+                r.width(),
+            );
+            let size = (tile.rect.h >= 44).then(|| {
+                one_line(
+                    &painter,
+                    format_bytes(tile.weight),
+                    FontId::monospace(11.0),
+                    ink.gamma_multiply(0.8),
+                    r.width(),
+                )
+            });
+            let block_h = name.size().y + size.as_ref().map_or(0.0, |g| g.size().y);
+            let top = egui::pos2(r.left(), r.bottom() - block_h);
+            let block = egui::Rect::from_min_size(top, egui::vec2(r.width(), block_h));
+            if pills.iter().any(|(p, _)| p.intersects(block)) {
+                continue;
+            }
+            let name_h = name.size().y;
+            painter.galley(top, name, ink);
+            if let Some(size) = size {
+                painter.galley(top + egui::vec2(0.0, name_h), size, ink);
+            }
+        }
+
+        // Selection and hover outlines on top.
+        if let Some(sel) = selected {
+            for frame in tiling.frames().iter().filter(|f| f.path == sel) {
                 painter.rect_stroke(
-                    full,
+                    screen_rect(frame.rect),
                     0.0,
-                    Stroke::new(2.0_f32, Color32::WHITE),
+                    Stroke::new(2.5_f32, SELECT),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            for tile in tiling.tiles().iter().filter(|t| t.path == sel && !t.merged) {
+                let r = screen_rect(tile.rect);
+                painter.rect_stroke(
+                    r,
+                    0.0,
+                    Stroke::new(3.0_f32, Color32::from_black_alpha(200)),
+                    egui::StrokeKind::Inside,
+                );
+                painter.rect_stroke(
+                    r,
+                    0.0,
+                    Stroke::new(1.5_f32, SELECT),
                     egui::StrokeKind::Inside,
                 );
             }
         }
-        let zoom_rect = egui::Rect::from_min_size(
-            rect.left_top() + egui::vec2(8.0, 8.0),
-            egui::vec2(96.0, 24.0),
-        );
-        let mut zoom_clicked = false;
-        if self.zoom.is_some() {
-            let btn = ui.put(zoom_rect, egui::Button::new("Zoom out"));
-            zoom_clicked = btn.clicked();
+        if let Some(frame) = hovered_top {
+            painter.rect_stroke(
+                screen_rect(frame.rect),
+                0.0,
+                Stroke::new(1.0_f32, Color32::from_white_alpha(90)),
+                egui::StrokeKind::Inside,
+            );
         }
-        if zoom_clicked {
-            self.zoom_out();
-            return;
+        if let Some(tile) = hovered_tile {
+            painter.rect_stroke(
+                screen_rect(tile.rect),
+                0.0,
+                Stroke::new(1.5_f32, Color32::from_white_alpha(220)),
+                egui::StrokeKind::Inside,
+            );
         }
-        let pointer = response.interact_pointer_pos().or(response.hover_pos());
-        if response.clicked() || response.double_clicked() {
-            if let Some(pos) = pointer {
-                if self.zoom.is_some() && zoom_rect.contains(pos) {
-                    return;
+
+        let pill_hit = pointer.and_then(|p| {
+            pills
+                .iter()
+                .find(|(r, _)| r.contains(p))
+                .map(|(_, path)| path.to_path_buf())
+        });
+        let tip = hovered_tile.map(|tile| {
+            hover_lines(
+                tile,
+                pill_hit.as_deref(),
+                hovered_top,
+                focus_size,
+                root_size,
+            )
+        });
+        let target = pill_hit
+            .clone()
+            .or_else(|| hovered_tile.map(|t| t.path.clone()));
+        let target_merged = pill_hit.is_none() && hovered_tile.is_some_and(|t| t.merged);
+        let response = match tip {
+            Some(lines) => response.on_hover_ui_at_pointer(|ui| {
+                ui.set_max_width(360.0);
+                for (i, line) in lines.into_iter().enumerate() {
+                    if i == 0 {
+                        ui.label(egui::RichText::new(line).strong());
+                    } else {
+                        ui.label(line);
+                    }
                 }
-                if let Some(path) = self
-                    .map_cache
+            }),
+            None => response,
+        };
+
+        if response.clicked() || response.double_clicked() {
+            if let Some(path) = target {
+                let is_dir = self
+                    .result
                     .as_ref()
-                    .and_then(|cache| cache.tiling.hit(pos.x.floor() as i32, pos.y.floor() as i32))
-                {
-                    let path = path.to_path_buf();
-                    let is_dir = self
-                        .result
-                        .as_ref()
-                        .and_then(|result| find_node(&result.root, &path))
-                        .is_some_and(|node| node.is_dir);
-                    if let Some(result) = &self.result {
-                        expand_to(&result.root, &path, &mut self.expanded);
-                    }
-                    self.selected = Some(path.clone());
-                    if response.double_clicked() && is_dir && !self.tile_is_merged(&path) {
-                        self.zoom = Some(path);
-                        self.map_cache = None;
-                    } else if response.double_clicked() && !is_dir {
-                        self.reveal_selected();
-                    }
+                    .and_then(|result| find_node(&result.root, &path))
+                    .is_some_and(|node| node.is_dir);
+                if let Some(result) = &self.result {
+                    expand_to(&result.root, &path, &mut self.expanded);
+                }
+                self.selected = Some(path.clone());
+                if response.double_clicked() && is_dir && !target_merged {
+                    self.zoom = Some(path);
+                    self.map_cache = None;
+                } else if response.double_clicked() && !is_dir {
+                    self.reveal_selected();
                 }
             }
         }
@@ -734,20 +981,6 @@ impl SpaceTreeApp {
         find_node(root, path)
             .filter(|node| node.is_dir)
             .unwrap_or(root)
-    }
-
-    fn tile_is_merged(&self, path: &std::path::Path) -> bool {
-        self.map_cache
-            .as_ref()
-            .and_then(|cache| {
-                cache
-                    .tiling
-                    .tiles()
-                    .iter()
-                    .find(|tile| tile.path == path)
-                    .map(|tile| tile.merged)
-            })
-            .unwrap_or(false)
     }
 
     fn zoom_out(&mut self) {
@@ -780,20 +1013,6 @@ fn flatten<'a>(
 
 fn default_path() -> String {
     std::env::var("HOME").unwrap_or_else(|_| String::from("/"))
-}
-
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut v = bytes as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    format!("{v:.1} {}", UNITS[u])
 }
 
 fn format_percent(p: f64) -> String {
@@ -843,10 +1062,17 @@ fn screen_rect(r: PxRect) -> egui::Rect {
     )
 }
 
-fn paint_other(painter: &egui::Painter, rect: egui::Rect) {
+const MAP_BG: Color32 = Color32::from_rgb(14, 16, 22);
+const FRAME_LINE: Color32 = Color32::from_rgb(8, 9, 12);
+const PILL_BG: Color32 = Color32::from_rgba_premultiplied(10, 12, 18, 200);
+const PILL_HOT: Color32 = Color32::from_rgba_premultiplied(40, 46, 62, 230);
+const SELECT: Color32 = Color32::from_rgb(255, 196, 64);
+
+/// Merged small items: slate with a fine hatch so it never reads as a file.
+fn paint_other(painter: &egui::Painter, rect: egui::Rect, weight: u64) {
     let painter = painter.with_clip_rect(rect);
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(72, 74, 82));
-    let stroke = Stroke::new(1.0_f32, Color32::from_rgb(150, 154, 166));
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(52, 56, 66));
+    let stroke = Stroke::new(1.0_f32, Color32::from_rgb(78, 84, 98));
     let mut x = rect.left() - rect.height();
     while x < rect.right() {
         painter.line_segment(
@@ -856,27 +1082,41 @@ fn paint_other(painter: &egui::Painter, rect: egui::Rect) {
             ],
             stroke,
         );
-        x += 8.0;
+        x += 6.0;
     }
-    if rect.width() > 36.0 && rect.height() > 16.0 {
+    if rect.width() > 64.0 && rect.height() > 34.0 {
+        painter.text(
+            rect.center() - egui::vec2(0.0, 7.0),
+            Align2::CENTER_CENTER,
+            "Other",
+            FontId::proportional(12.0),
+            Color32::WHITE,
+        );
+        painter.text(
+            rect.center() + egui::vec2(0.0, 8.0),
+            Align2::CENTER_CENTER,
+            format_bytes(weight),
+            FontId::monospace(11.0),
+            Color32::from_gray(200),
+        );
+    } else if rect.width() > 36.0 && rect.height() > 16.0 {
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
             "Other",
-            FontId::proportional(13.0),
+            FontId::proportional(11.0),
             Color32::WHITE,
         );
     }
 }
 
+/// Cushion lit from the top left: bright corner, darker opposite corner.
 fn paint_cushion(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let light = mix_white(color, 0.4);
     let mut mesh = Mesh::default();
-    let center = rect.center();
-    mesh.colored_vertex(center, light);
-    mesh.colored_vertex(rect.left_top(), color);
+    mesh.colored_vertex(rect.center(), mix(color, Color32::WHITE, 0.16));
+    mesh.colored_vertex(rect.left_top(), mix(color, Color32::WHITE, 0.30));
     mesh.colored_vertex(rect.right_top(), color);
-    mesh.colored_vertex(rect.right_bottom(), color);
+    mesh.colored_vertex(rect.right_bottom(), mix(color, Color32::BLACK, 0.30));
     mesh.colored_vertex(rect.left_bottom(), color);
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
@@ -885,11 +1125,110 @@ fn paint_cushion(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
     painter.add(egui::Shape::mesh(mesh));
 }
 
-fn mix_white(color: Color32, toward: f32) -> Color32 {
-    let mix = |channel: u8| -> u8 {
-        (f32::from(channel) * (1.0 - toward) + 255.0 * toward).round() as u8
+fn mix(color: Color32, toward: Color32, t: f32) -> Color32 {
+    let m = |a: u8, b: u8| -> u8 { (f32::from(a) * (1.0 - t) + f32::from(b) * t).round() as u8 };
+    Color32::from_rgb(
+        m(color.r(), toward.r()),
+        m(color.g(), toward.g()),
+        m(color.b(), toward.b()),
+    )
+}
+
+fn luminance(r: u8, g: u8, b: u8) -> f32 {
+    0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)
+}
+
+fn one_line(
+    painter: &egui::Painter,
+    text: String,
+    font: FontId,
+    color: Color32,
+    max_width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text, font, color);
+    job.wrap = egui::text::TextWrapping {
+        max_width: max_width.max(1.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
     };
-    Color32::from_rgb(mix(color.r()), mix(color.g()), mix(color.b()))
+    painter.layout_job(job)
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Tooltip text for the tile under the pointer, or for the folder whose label
+/// is under it.
+fn hover_lines(
+    tile: &crate::Tile,
+    pill: Option<&Path>,
+    top: Option<&crate::Frame>,
+    focus_size: u64,
+    root_size: u64,
+) -> Vec<String> {
+    if let (Some(path), Some(frame)) = (pill, top) {
+        if frame.path == path {
+            return vec![
+                format!("{}/", file_name(path)),
+                format!("{}  ·  allocated", format_bytes(frame.weight)),
+                format!(
+                    "{} of this view  ·  {} of scan",
+                    format_scan_share(frame.weight, focus_size),
+                    format_scan_share(frame.weight, root_size)
+                ),
+                "Double-click to zoom in".into(),
+            ];
+        }
+    }
+    let mut lines = Vec::new();
+    if tile.merged {
+        lines.push("Other: smaller items".into());
+        lines.push(format!(
+            "{}  ·  allocated, combined",
+            format_bytes(tile.weight)
+        ));
+    } else {
+        lines.push(file_name(&tile.path));
+        lines.push(format!(
+            "{}  ·  {}",
+            format_bytes(tile.weight),
+            ext_description(&tile.color_ext)
+        ));
+    }
+    lines.push(format!(
+        "{} of this view  ·  {} of scan",
+        format_scan_share(tile.weight, focus_size),
+        format_scan_share(tile.weight, root_size)
+    ));
+    if let Some(frame) = top {
+        lines.push(format!(
+            "in {}/  ({})",
+            file_name(&frame.path),
+            format_bytes(frame.weight)
+        ));
+    }
+    lines
+}
+
+/// Root-to-focus path segments for the breadcrumb bar.
+fn breadcrumbs(root: &Node, focus: &Path) -> Vec<(PathBuf, String)> {
+    let mut out: Vec<(PathBuf, String)> = focus
+        .ancestors()
+        .take_while(|p| p.starts_with(&root.path) && *p != root.path)
+        .map(|p| (p.to_path_buf(), file_name(p)))
+        .collect();
+    let root_name = if root.name.is_empty() {
+        root.path.display().to_string()
+    } else {
+        root.name.clone()
+    };
+    out.push((root.path.clone(), root_name));
+    out.reverse();
+    out
 }
 
 fn find_with_parent_path(root: &Node, path: &Path) -> Option<PathBuf> {

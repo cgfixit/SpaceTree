@@ -5,8 +5,8 @@ SpaceTree is a Rust and `eframe` macOS disk usage viewer. A user selects a folde
 ## Read the current implementation
 
 - `src/scan.rs` owns filesystem traversal and size accounting. `src/layout.rs` places treemap tiles. `src/app.rs` owns the native window and interactions. `src/ext.rs` defines extension colors. `src/finder.rs` opens a selected path in Finder.
-- `tests/scan.rs`, `tests/layout.rs`, `tests/ext.rs`, and `tests/ui_cost.rs` cover the corresponding behavior. `scripts/ci-runtime.sh` exercises the built CLI. `scripts/make-app.sh` creates and ad-hoc signs `dist/SpaceTree.app`.
-- `.github/workflows/ci.yml` tests macOS and Linux. `lint.yml` covers rustfmt, Clippy, and actionlint. `bundle.yml` packages the app; `cargo-deny.yml`, `gitleaks.yml`, and `MSDO.yml` scan dependencies or security findings. Inspect these jobs before adding a workflow.
+- `tests/scan.rs`, `tests/layout.rs`, `tests/ext.rs`, `tests/format.rs`, and `tests/ui_cost.rs` cover the corresponding behavior. `scripts/ci-runtime.sh` exercises the built CLI. `scripts/verify-macos-sizes.sh` compares scan sizes with `stat`, `du`, and `df` on macOS. `scripts/make-app.sh` creates and ad-hoc signs `dist/SpaceTree.app`.
+- `.github/workflows/ci.yml` tests macOS and Linux. `lint.yml` covers rustfmt, Clippy, and actionlint. `bundle.yml` packages the app; `release.yml` publishes it on demand and `auto-release.yml` publishes each fully green commit on main; `cargo-deny.yml`, `gitleaks.yml`, and `MSDO.yml` scan dependencies or security findings. Inspect these jobs before adding a workflow.
 - `README.md` describes the product and lists ideas. Check each idea against current code and the running app before treating it as missing. The committed screenshot is a reference, not proof of current behavior.
 
 ## Preserve product contracts

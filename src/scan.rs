@@ -18,6 +18,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use rayon::prelude::*;
 
 use crate::ext::ext_key;
+use crate::extents::ExtentLedger;
 
 /// One file or folder in the expandable tree.
 #[derive(Clone, Debug)]
@@ -37,6 +38,43 @@ pub struct Node {
     pub created: Option<SystemTime>,
     pub percent_of_disk: f64,
     pub children: Vec<Node>,
+}
+
+/// APFS clone accounting shared by the scan workers.
+#[derive(Default)]
+struct CloneBook {
+    /// Clone ids already counted. A pure clone shares every extent with the
+    /// first file of its id, so it counts zero.
+    ids: Mutex<HashSet<u64>>,
+    /// Physical ranges counted for files that share some extents. A clone
+    /// rewritten in part gets a new id but keeps most of its blocks shared.
+    extents: Mutex<ExtentLedger>,
+}
+
+impl CloneBook {
+    /// True when `id` is new to the scan.
+    fn first_of_id(&self, id: u64) -> bool {
+        self.ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id)
+    }
+
+    /// Allocated bytes of a file that shares extents, minus the bytes of its
+    /// extents another file already counted. Unreadable extents keep `size`.
+    fn unshared(&self, path: &Path, dev: u64, size: u64) -> u64 {
+        match physical_extents(path) {
+            Some(ranges) => {
+                let counted = self
+                    .extents
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .claim(dev, &ranges);
+                size.saturating_sub(counted)
+            }
+            None => size,
+        }
+    }
 }
 
 struct ExtSum {
@@ -62,7 +100,7 @@ pub fn scan(path: &Path) -> io::Result<ScanResult> {
     let lmeta = fs::symlink_metadata(path)?;
     let volume_total = volume_total_bytes(path);
     let seen = Mutex::new(HashSet::new());
-    let clones = Mutex::new(HashSet::new());
+    let clones = CloneBook::default();
     let errors = AtomicU64::new(0);
     let root = if lmeta.file_type().is_dir() {
         walk_dir(path, &lmeta, volume_total, path, &seen, &clones, &errors)?.0
@@ -91,11 +129,26 @@ pub(crate) fn percent_of_disk(size: u64, volume_total: u64) -> f64 {
     }
 }
 
+/// Capacity of the volume that holds `path`, as Finder reports it.
+///
+/// macOS uses `statfs`: its block count is 64-bit. Darwin's `statvfs` stores
+/// `f_blocks` in a 32-bit `fsblkcnt_t`, which cannot describe a volume of
+/// 2^32 blocks or more (16 TiB at 4 KiB blocks).
 fn volume_total_bytes(path: &Path) -> u64 {
     let c = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
         Ok(c) => c,
         Err(_) => return 0,
     };
+    #[cfg(target_os = "macos")]
+    unsafe {
+        // SAFETY: `c` is a NUL-terminated path; `s` is a valid statfs out-param.
+        let mut s: libc::statfs = std::mem::zeroed();
+        if libc::statfs(c.as_ptr(), &mut s) != 0 {
+            return 0;
+        }
+        s.f_blocks.saturating_mul(u64::from(s.f_bsize))
+    }
+    #[cfg(not(target_os = "macos"))]
     unsafe {
         // SAFETY: `c` is a NUL-terminated path; `s` is a valid statvfs out-param.
         let mut s: libc::statvfs = std::mem::zeroed();
@@ -103,6 +156,17 @@ fn volume_total_bytes(path: &Path) -> u64 {
             return 0;
         }
         (s.f_blocks as u64).saturating_mul(s.f_frsize as u64)
+    }
+}
+
+/// `st_dev` as the bulk reader reports it. Darwin's `dev_t` is a signed
+/// 32-bit value; `MetadataExt::dev` sign-extends it while `ATTR_CMN_DEVID`
+/// is read as unsigned, so normalize both to the same 32 bits.
+fn dev_id(meta: &Metadata) -> u64 {
+    if cfg!(target_os = "macos") {
+        u64::from(meta.dev() as u32)
+    } else {
+        meta.dev()
     }
 }
 
@@ -124,12 +188,12 @@ fn leaf(
     path: &Path,
     meta: &Metadata,
     volume_total: u64,
-    clones: &Mutex<HashSet<u64>>,
+    clones: &CloneBook,
 ) -> (Node, BTreeMap<String, ExtSum>) {
     let mut size = allocated_bytes(meta);
     if !meta.file_type().is_symlink() {
         if let Some(id) = apfs_clone_id(path) {
-            if !clones.lock().unwrap_or_else(|e| e.into_inner()).insert(id) {
+            if !clones.first_of_id(id) {
                 size = 0;
             }
         }
@@ -271,6 +335,8 @@ const ATTR_FILE_ALLOCSIZE: u32 = 0x0000_0004;
 #[cfg(target_os = "macos")]
 const ATTR_FILE_DATALENGTH: u32 = 0x0000_0200;
 #[cfg(target_os = "macos")]
+const ATTR_CMNEXT_PRIVATESIZE: u32 = 0x0000_0008;
+#[cfg(target_os = "macos")]
 const ATTR_CMNEXT_CLONEID: u32 = 0x0000_0100;
 #[cfg(target_os = "macos")]
 const FSOPT_NOFOLLOW: u64 = 0x1;
@@ -302,6 +368,8 @@ struct BulkEnt {
     alloc_size: u64,
     has_sizes: bool,
     clone_id: Option<u64>,
+    /// Bytes not shared with any other clone (`ATTR_CMNEXT_PRIVATESIZE`).
+    private_size: Option<u64>,
 }
 
 #[cfg(target_os = "macos")]
@@ -361,7 +429,7 @@ fn list_bulk_fd(fd: libc::c_int, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>>
         volattr: 0,
         dirattr: 0,
         fileattr: ATTR_FILE_DATALENGTH | ATTR_FILE_ALLOCSIZE,
-        forkattr: ATTR_CMNEXT_CLONEID,
+        forkattr: ATTR_CMNEXT_PRIVATESIZE | ATTR_CMNEXT_CLONEID,
     };
     let mut buf = vec![0u8; 256 * 1024];
     let mut out = Vec::new();
@@ -509,6 +577,17 @@ fn parse_bulk_entry(buf: &[u8], start: usize) -> Option<(usize, BulkEnt)> {
         o += 8;
         has_sizes = true;
     }
+    // Fork (extended common) attributes also arrive in ascending bit order.
+    let mut private_size = None;
+    if fork & ATTR_CMNEXT_PRIVATESIZE != 0 {
+        o = align4(o);
+        if o + 8 > rec.len() {
+            return None;
+        }
+        let bytes = i64::from_ne_bytes(rec[o..o + 8].try_into().ok()?);
+        private_size = u64::try_from(bytes).ok();
+        o += 8;
+    }
     let mut clone_id = None;
     if fork & ATTR_CMNEXT_CLONEID != 0 {
         o = align4(o);
@@ -533,6 +612,7 @@ fn parse_bulk_entry(buf: &[u8], start: usize) -> Option<(usize, BulkEnt)> {
             alloc_size,
             has_sizes,
             clone_id,
+            private_size,
         },
     ))
 }
@@ -607,9 +687,63 @@ fn list_bulk(path: &Path, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>> {
             alloc_size,
             has_sizes: true,
             clone_id: None,
+            private_size: None,
         });
     }
     Ok(out)
+}
+
+/// Physical `(device offset, length)` ranges of a file's data, from
+/// `F_LOG2PHYS_EXT`. Holes are skipped. `None` when the file cannot be read.
+#[cfg(target_os = "macos")]
+fn physical_extents(path: &Path) -> Option<Vec<(u64, u64)>> {
+    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let fd = unsafe {
+        // SAFETY: `c` is a NUL-terminated path.
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    let fd = DirFd(fd);
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `fd` is open; `st` is a valid out-param.
+    if unsafe { libc::fstat(fd.0, &mut st) } != 0 {
+        return None;
+    }
+    let size = u64::try_from(st.st_size).ok()?;
+    let mut out = Vec::new();
+    let mut off = 0u64;
+    // A file with more extents than this is counted at its full allocation.
+    for _ in 0..65_536 {
+        if off >= size {
+            return Some(out);
+        }
+        let mut l2p = libc::log2phys {
+            l2p_flags: 0,
+            l2p_contigbytes: i64::try_from(size - off).ok()?,
+            l2p_devoffset: i64::try_from(off).ok()?,
+        };
+        // SAFETY: `fd` is open; `l2p` is a valid in/out struct for F_LOG2PHYS_EXT.
+        if unsafe { libc::fcntl(fd.0, libc::F_LOG2PHYS_EXT, &mut l2p) } == -1 {
+            return None;
+        }
+        let len = u64::try_from(l2p.l2p_contigbytes).ok().filter(|&n| n > 0)?;
+        // A hole reports a negative device offset.
+        if let Ok(dev_off) = u64::try_from(l2p.l2p_devoffset) {
+            out.push((dev_off, len));
+        }
+        off = off.saturating_add(len);
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn physical_extents(_path: &Path) -> Option<Vec<(u64, u64)>> {
+    None
 }
 
 struct Subdir {
@@ -635,7 +769,7 @@ fn leaf_from_bulk(
     path: PathBuf,
     ent: &BulkEnt,
     volume_total: u64,
-    clones: &Mutex<HashSet<u64>>,
+    clones: &CloneBook,
     by_ext: &mut BTreeMap<String, ExtSum>,
     errors: &AtomicU64,
 ) -> Node {
@@ -655,10 +789,10 @@ fn leaf_from_bulk(
         (0, 0, None)
     };
     if !symlink {
-        if let Some(id) = clone_id {
-            if !clones.lock().unwrap_or_else(|e| e.into_inner()).insert(id) {
-                size = 0;
-            }
+        if clone_id.is_some_and(|id| !clones.first_of_id(id)) {
+            size = 0;
+        } else if ent.private_size.is_some_and(|private| private < size) {
+            size = clones.unshared(&path, ent.dev, size);
         }
     }
     let color_ext = note_file(by_ext, &name, size);
@@ -689,14 +823,14 @@ fn walk_dir(
     volume_total: u64,
     scan_root: &Path,
     seen: &Mutex<HashSet<(u64, u64)>>,
-    clones: &Mutex<HashSet<u64>>,
+    clones: &CloneBook,
     errors: &AtomicU64,
 ) -> io::Result<(Node, BTreeMap<String, ExtSum>)> {
     walk_dir_known(
         path,
         meta.modified().ok(),
         meta.created().ok(),
-        meta.dev(),
+        dev_id(meta),
         meta.ino(),
         volume_total,
         scan_root,
@@ -716,7 +850,7 @@ fn walk_dir_known(
     volume_total: u64,
     scan_root: &Path,
     seen: &Mutex<HashSet<(u64, u64)>>,
-    clones: &Mutex<HashSet<u64>>,
+    clones: &CloneBook,
     errors: &AtomicU64,
 ) -> io::Result<(Node, BTreeMap<String, ExtSum>)> {
     let _ = insert_seen(seen, dev, ino);
