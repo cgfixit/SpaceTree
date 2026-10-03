@@ -162,12 +162,18 @@ impl SpaceTreeApp {
     }
 }
 
+/// SpaceTree's Dock icon. eframe replaces the bundle icon at runtime with its
+/// own default unless the app supplies one.
+const APP_ICON_PNG: &[u8] = include_bytes!("../assets/AppIcon.png");
+
 pub fn run() -> eframe::Result<()> {
+    let icon = eframe::icon_data::from_png_bytes(APP_ICON_PNG).unwrap_or_default();
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 780.0])
             .with_min_inner_size([800.0, 500.0])
-            .with_title(APP_TITLE),
+            .with_title(APP_TITLE)
+            .with_icon(icon),
         ..Default::default()
     };
     eframe::run_native(

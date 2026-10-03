@@ -8,6 +8,8 @@
 	<string>SpaceTree</string>
 	<key>CFBundleExecutable</key>
 	<string>spacetree</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.cgfixit.spacetree</string>
 	<key>CFBundleInfoDictionaryVersion</key>
