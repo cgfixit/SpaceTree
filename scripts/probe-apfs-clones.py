@@ -74,37 +74,48 @@ def bulk(dirpath):
     return out
 
 
-F_LOG2PHYS_EXT = 65
-
-
-class Log2Phys(ctypes.Structure):
-    _pack_ = 4
-    _fields_ = [("flags", ctypes.c_uint32), ("contig", ctypes.c_int64), ("devoffset", ctypes.c_int64)]
+EXTENTS_C = r"""
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+int main(int argc, char **argv) {
+  for (int i = 1; i < argc; i++) {
+    int fd = open(argv[i], O_RDONLY | O_NOFOLLOW);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0) { printf("%s open-error %s\n", argv[i], strerror(errno)); continue; }
+    off_t off = 0; int calls = 0;
+    printf("%s", argv[i]);
+    while (off < st.st_size && calls < 64) {
+      struct log2phys l2p = {0};
+      l2p.l2p_contigbytes = st.st_size - off;
+      l2p.l2p_devoffset = off;
+      calls++;
+      if (fcntl(fd, F_LOG2PHYS_EXT, &l2p) == -1) {
+        printf(" [%lld err %s]", (long long)off, strerror(errno));
+        off += 4096;
+        continue;
+      }
+      printf(" [%lld dev=%lld len=%lld]", (long long)off, (long long)l2p.l2p_devoffset, (long long)l2p.l2p_contigbytes);
+      if (l2p.l2p_contigbytes <= 0) break;
+      off += l2p.l2p_contigbytes;
+    }
+    printf(" calls=%d\n", calls);
+    close(fd);
+  }
+  return 0;
+}
+"""
+EXTENTS_BIN = os.path.join(tempfile.mkdtemp(), "extents")
+with open(EXTENTS_BIN + ".c", "w") as f:
+    f.write(EXTENTS_C)
+subprocess.run(["cc", "-O1", "-o", EXTENTS_BIN, EXTENTS_BIN + ".c"], check=True)
 
 
 def extents(p):
-    """[(file_off, dev_off, len)] from F_LOG2PHYS_EXT, or an error string."""
-    size = os.lstat(p).st_size
-    fd = os.open(p, os.O_RDONLY)
-    out, off, calls = [], 0, 0
-    libc.fcntl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-    try:
-        while off < size:
-            l2p = Log2Phys(0, size - off, off)
-            calls += 1
-            if libc.fcntl(fd, F_LOG2PHYS_EXT, ctypes.byref(l2p)) == -1:
-                out.append(("err", off, os.strerror(ctypes.get_errno())))
-                off += 4096
-                if calls > 64:
-                    break
-                continue
-            out.append((off, l2p.devoffset, l2p.contig))
-            if l2p.contig <= 0:
-                break
-            off += l2p.contig
-    finally:
-        os.close(fd)
-    return out
+    return subprocess.run([EXTENTS_BIN, p], capture_output=True, text=True).stdout.strip().split(" ", 1)[-1]
 
 
 def alloc(p):
@@ -155,8 +166,7 @@ try:
         for n in sorted(os.listdir(d)):
             p = f"{d}/{n}"
             print(f"   {n}: alloc={alloc(p)} single={single(p)} bulk={b.get(n)}")
-            ex = extents(p)
-            print(f"      extents({len(ex)}): {ex[:6]}{' ...' if len(ex) > 6 else ''}")
+            print(f"      extents: {extents(p)[:400]}")
 finally:
     shutil.rmtree(root, ignore_errors=True)
 sdk = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True, text=True).stdout.strip()
