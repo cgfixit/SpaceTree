@@ -716,6 +716,7 @@ impl SpaceTreeApp {
                     self.map_cache = None;
                 }
             }
+            ui.ctx().request_repaint();
             return;
         }
 
