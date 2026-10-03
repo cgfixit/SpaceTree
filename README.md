@@ -5,10 +5,10 @@ SpaceTree is a macOS disk usage app. You pick a folder or a disk. The window lis
 ![CG Agent Harness running on macOS](/screenshots/SpaceTree-9.28.26.jpeg)
 
 - The table columns are Name, Size Proportion, Percentage, Physical Size, Logical Size, and Files. Percentage is that row's allocated bytes divided by the scan root. The scan root is 100%.
-- The treemap draws one rectangle per file. Area is allocated size. Color is the file extension. A folder is a frame around its children. Double-click a folder to zoom in. Double-click a file to reveal it in Finder. Zoom out walks back to the parent, then to the scan root. A single click selects a row and does not zoom.
-- The legend lists the extension colors in the current scan.
+- The treemap draws one rectangle per file. Area is allocated size. Color is the file extension. Each folder is outlined around its files; large folders carry a name and size label, and large files show their name and size. Hover a tile for its size, kind, and share of the view and of the scan. Double-click a folder (or its label) to zoom in. Double-click a file to reveal it in Finder. The bar above the map shows the path you are in; click any part of it to jump back, or press Esc or Zoom out to go up one level. A single click selects a row and does not zoom; selecting a folder in the table outlines it in the map.
+- The legend lists the extension colors in the current scan with each one's size and share. Hover a legend row to highlight that extension in the map.
 
-Physical Size is allocated bytes (`st_blocks * 512`). Logical Size is `st_size`. A directory's size is the sum of its children. An APFS clone keeps its allocated bytes on the first file seen and counts as zero after that. The walk does not follow a child symlink. It skips `/System/Volumes` unless that path is the scan root, so the Data volume is not counted twice.
+Physical Size is allocated bytes (`st_blocks * 512`). Logical Size is `st_size`. Sizes use decimal units, as Finder does (1 GB = 1,000,000,000 bytes); hover a size for the exact byte count. The volume size is the capacity `statfs` reports, the same figure `df` shows. A directory's size is the sum of its children. An APFS clone keeps its allocated bytes on the first file seen and counts as zero after that. The walk does not follow a child symlink. It skips `/System/Volumes` unless that path is the scan root, so the Data volume is not counted twice.
 
 ## Requirements
 
@@ -36,8 +36,10 @@ Package the app:
 open dist/SpaceTree.app
 ```
 
-`scripts/make-app.sh` builds a release binary, copies `Info.plist`, and ad-hoc signs `dist/SpaceTree.app`. The bundle id is `com.cgfixit.spacetree`, version 0.1.0. The app is not signed with an Apple Developer ID. On first launch, right-click SpaceTree.app and choose Open, then confirm.
+`scripts/make-app.sh` builds a release binary, copies `Info.plist`, builds `AppIcon.icns` from `assets/AppIcon.png`, and ad-hoc signs `dist/SpaceTree.app`. The icon source is `assets/icon.svg`; `node scripts/render-icon.cjs` re-renders the PNG (it needs Playwright). The bundle id is `com.cgfixit.spacetree`, version 0.1.0. The app is not signed with an Apple Developer ID. On first launch, right-click SpaceTree.app and choose Open, then confirm.
 
+
+Every merge to `main` whose checks all pass is published as a GitHub release by `.github/workflows/auto-release.yml`, tagged `v<version>-main.<date>.<sha>`. `release.yml` still publishes a named `v<version>` release on demand.
 
 ## Continuous Development (kinda; im sure df can be formatted and used with fancy flags to look all pretty but I mean unless im literally using linux without x why would I act like thats better. Research that later to make sure im not missing out on things that are better than the GUI habit I keep vibe coding from windows concepts (shoutout to WinDirStat):
 
