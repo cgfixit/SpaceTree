@@ -14,7 +14,7 @@ pub use ext::{
 };
 pub use format::{format_bytes, format_scan};
 pub use layout::{
-    layout_items, layout_node, split_span, treemap_focus, LayoutItem, PxRect, Tile, Tiling,
+    layout_items, layout_node, split_span, treemap_focus, Frame, LayoutItem, PxRect, Tile, Tiling,
 };
 pub use scan::{scan, Node, ScanResult};
 pub use sort::{sort_children, sort_tree, SortColumn};

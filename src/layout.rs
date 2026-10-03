@@ -27,12 +27,49 @@ pub struct Tile {
     pub rect: PxRect,
     pub color_ext: String,
     pub merged: bool,
+    /// Allocated bytes behind this tile. A merged tile carries the merged sum.
+    pub weight: u64,
+}
+
+/// A directory drawn as the outline around its children's tiles.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub path: PathBuf,
+    pub rect: PxRect,
+    pub weight: u64,
+    /// 1 for a direct child of the focus, 2 for a grandchild, and so on.
+    pub depth: u32,
 }
 
 #[derive(Clone, Debug)]
 pub struct Tiling {
     bounds: PxRect,
     tiles: Vec<Tile>,
+    frames: Vec<Frame>,
+}
+
+struct Out {
+    tiles: Vec<Tile>,
+    frames: Vec<Frame>,
+    depth: u32,
+}
+
+impl Out {
+    fn new() -> Self {
+        Out {
+            tiles: Vec::new(),
+            frames: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    fn finish(self, bounds: PxRect) -> Tiling {
+        Tiling {
+            bounds,
+            tiles: self.tiles,
+            frames: self.frames,
+        }
+    }
 }
 
 impl Tiling {
@@ -44,11 +81,22 @@ impl Tiling {
         &self.tiles
     }
 
+    /// Directory outlines in placement order: a parent precedes its children.
+    pub fn frames(&self) -> &[Frame] {
+        &self.frames
+    }
+
     pub fn hit(&self, x: i32, y: i32) -> Option<&Path> {
-        self.tiles
-            .iter()
-            .find(|t| contains(t.rect, x, y))
-            .map(|t| t.path.as_path())
+        self.hit_tile(x, y).map(|t| t.path.as_path())
+    }
+
+    pub fn hit_tile(&self, x: i32, y: i32) -> Option<&Tile> {
+        self.tiles.iter().find(|t| contains(t.rect, x, y))
+    }
+
+    /// Frames under a point, outermost first.
+    pub fn frames_at(&self, x: i32, y: i32) -> impl Iterator<Item = &Frame> {
+        self.frames.iter().filter(move |f| contains(f.rect, x, y))
     }
 }
 
@@ -95,26 +143,26 @@ pub fn split_span(span: u32, weights: &[u64]) -> Vec<u32> {
 }
 
 pub fn layout_items(items: &[LayoutItem], bounds: PxRect) -> Tiling {
-    let mut tiles = Vec::new();
-    place_list(items, bounds, &mut tiles);
-    Tiling { bounds, tiles }
+    let mut out = Out::new();
+    place_list(items, bounds, &mut out);
+    out.finish(bounds)
 }
 
 pub fn layout_node(focus: &Node, bounds: PxRect) -> Tiling {
-    let mut tiles = Vec::new();
-    place_one_node(focus, bounds, &mut tiles);
-    Tiling { bounds, tiles }
+    let mut out = Out::new();
+    place_one_node(focus, bounds, &mut out);
+    out.finish(bounds)
 }
 
-fn place_one_node(node: &Node, rect: PxRect, tiles: &mut Vec<Tile>) {
+fn place_one_node(node: &Node, rect: PxRect, out: &mut Out) {
     if rect.w == 0 || rect.h == 0 || node.size == 0 {
         return;
     }
     if !node.is_dir || node.children.is_empty() || rect.w < 4 || rect.h < 4 {
-        push_tile(tiles, &node.path, &node.color_ext, false, rect);
+        push_tile(out, &node.path, &node.color_ext, false, node.size, rect);
         return;
     }
-    place_nodes(&node.children, rect, tiles);
+    place_nodes(&node.children, rect, out);
 }
 
 pub fn treemap_focus<'a>(root: &'a Node, selected: Option<&Path>) -> &'a Node {
@@ -196,7 +244,7 @@ fn part_node(node: &Node) -> Part<'_> {
     }
 }
 
-fn place_list(items: &[LayoutItem], bounds: PxRect, tiles: &mut Vec<Tile>) {
+fn place_list(items: &[LayoutItem], bounds: PxRect, out: &mut Out) {
     let mut live: Vec<&LayoutItem> = items.iter().filter(|i| i.weight > 0).collect();
     live.sort_by(|a, b| b.weight.cmp(&a.weight).then_with(|| a.path.cmp(&b.path)));
     let budget = tile_budget(bounds);
@@ -213,14 +261,14 @@ fn place_list(items: &[LayoutItem], bounds: PxRect, tiles: &mut Vec<Tile>) {
         let mut parts: Vec<Part<'_>> = live[..budget - 1].iter().copied().map(part_item).collect();
         parts.push(part_item(&dust));
         parts.sort_by(|a, b| b.weight.cmp(&a.weight).then_with(|| a.path.cmp(b.path)));
-        squarify(&parts, bounds, tiles);
+        squarify(&parts, bounds, out);
         return;
     }
     let parts: Vec<Part<'_>> = live.iter().copied().map(part_item).collect();
-    squarify(&parts, bounds, tiles);
+    squarify(&parts, bounds, out);
 }
 
-fn place_nodes(nodes: &[Node], bounds: PxRect, tiles: &mut Vec<Tile>) {
+fn place_nodes(nodes: &[Node], bounds: PxRect, out: &mut Out) {
     let mut live: Vec<&Node> = nodes.iter().filter(|n| n.size > 0).collect();
     live.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
     let budget = tile_budget(bounds);
@@ -237,19 +285,19 @@ fn place_nodes(nodes: &[Node], bounds: PxRect, tiles: &mut Vec<Tile>) {
         let mut parts: Vec<Part<'_>> = live[..budget - 1].iter().copied().map(part_node).collect();
         parts.push(part_item(&dust));
         parts.sort_by(|a, b| b.weight.cmp(&a.weight).then_with(|| a.path.cmp(b.path)));
-        squarify(&parts, bounds, tiles);
+        squarify(&parts, bounds, out);
         return;
     }
     let parts: Vec<Part<'_>> = live.iter().copied().map(part_node).collect();
-    squarify(&parts, bounds, tiles);
+    squarify(&parts, bounds, out);
 }
 
-fn squarify(items: &[Part<'_>], rect: PxRect, tiles: &mut Vec<Tile>) {
+fn squarify(items: &[Part<'_>], rect: PxRect, out: &mut Out) {
     if items.is_empty() || rect.w == 0 || rect.h == 0 {
         return;
     }
     if items.len() == 1 {
-        place_one(&items[0], rect, tiles);
+        place_one(&items[0], rect, out);
         return;
     }
     let mut start = 0;
@@ -260,40 +308,56 @@ fn squarify(items: &[Part<'_>], rect: PxRect, tiles: &mut Vec<Tile>) {
         }
         let rest = &items[start..];
         if rest.len() == 1 {
-            place_one(&rest[0], area, tiles);
+            place_one(&rest[0], area, out);
             return;
         }
         let n = choose_row(rest, area);
         let row = &rest[..n];
         let last = n == rest.len();
         let (row_rect, leftover) = strip(area, weight_of(row), weight_of(rest), last);
-        commit_row(row, row_rect, area.w >= area.h, tiles);
+        commit_row(row, row_rect, area.w >= area.h, out);
         start += n;
         area = leftover;
     }
 }
 
-fn place_one(part: &Part<'_>, rect: PxRect, tiles: &mut Vec<Tile>) {
+fn place_one(part: &Part<'_>, rect: PxRect, out: &mut Out) {
     if rect.w == 0 || rect.h == 0 {
         return;
     }
     let tiny = rect.w < 4 || rect.h < 4;
     if tiny || matches!(part.kids, Kids::Leaf) {
-        push_tile(tiles, part.path, part.color_ext, part.merged, rect);
+        push_tile(
+            out,
+            part.path,
+            part.color_ext,
+            part.merged,
+            part.weight,
+            rect,
+        );
         return;
     }
+    out.depth += 1;
+    out.frames.push(Frame {
+        path: part.path.to_path_buf(),
+        rect,
+        weight: part.weight,
+        depth: out.depth,
+    });
     match part.kids {
-        Kids::Items(children) => place_list(children, rect, tiles),
-        Kids::Nodes(children) => place_nodes(children, rect, tiles),
+        Kids::Items(children) => place_list(children, rect, out),
+        Kids::Nodes(children) => place_nodes(children, rect, out),
         Kids::Leaf => {}
     }
+    out.depth -= 1;
 }
 
-fn push_tile(tiles: &mut Vec<Tile>, path: &Path, color_ext: &str, merged: bool, rect: PxRect) {
-    tiles.push(Tile {
+fn push_tile(out: &mut Out, path: &Path, color_ext: &str, merged: bool, weight: u64, rect: PxRect) {
+    out.tiles.push(Tile {
         path: path.to_path_buf(),
         color_ext: color_ext.to_string(),
         merged,
+        weight,
         rect,
     });
 }
@@ -434,8 +498,8 @@ fn split_row(row: &[Part<'_>], row_rect: PxRect, along_y: bool) -> Vec<PxRect> {
     }
 }
 
-fn commit_row(row: &[Part<'_>], row_rect: PxRect, along_y: bool, tiles: &mut Vec<Tile>) {
+fn commit_row(row: &[Part<'_>], row_rect: PxRect, along_y: bool, out: &mut Out) {
     for (item, rect) in row.iter().zip(split_row(row, row_rect, along_y)) {
-        place_one(item, rect, tiles);
+        place_one(item, rect, out);
     }
 }

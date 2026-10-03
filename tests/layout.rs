@@ -148,3 +148,77 @@ fn file_selection_focuses_the_parent_directory() {
     );
     assert_eq!(treemap_focus(&root, None).path, Path::new("/scan"));
 }
+
+#[test]
+fn directories_record_nested_frames_around_their_tiles() {
+    let tiling = layout_items(
+        &[
+            dir(
+                "left",
+                2,
+                vec![dir("left/in", 2, vec![item("left/in/a", 2)])],
+            ),
+            dir("right", 2, vec![item("right/b", 1), item("right/c", 1)]),
+        ],
+        rect(0, 0, 20, 8),
+    );
+    let frames: Vec<(&Path, PxRect, u64, u32)> = tiling
+        .frames()
+        .iter()
+        .map(|f| (f.path.as_path(), f.rect, f.weight, f.depth))
+        .collect();
+    assert_eq!(
+        frames,
+        vec![
+            (Path::new("left"), rect(0, 0, 10, 8), 2, 1),
+            (Path::new("left/in"), rect(0, 0, 10, 8), 2, 2),
+            (Path::new("right"), rect(10, 0, 10, 8), 2, 1),
+        ]
+    );
+    // Every tile sits inside the frame of each ancestor directory.
+    for t in tiling.tiles() {
+        for f in tiling.frames() {
+            if t.path.starts_with(&f.path) {
+                assert!(t.rect.x >= f.rect.x && t.rect.y >= f.rect.y);
+                assert!(t.rect.x + t.rect.w as i32 <= f.rect.x + f.rect.w as i32);
+                assert!(t.rect.y + t.rect.h as i32 <= f.rect.y + f.rect.h as i32);
+            }
+        }
+    }
+    let under: Vec<&Path> = tiling.frames_at(1, 1).map(|f| f.path.as_path()).collect();
+    assert_eq!(under, vec![Path::new("left"), Path::new("left/in")]);
+    assert_partition(&tiling, 20, 8);
+}
+
+#[test]
+fn tiles_carry_their_weight_and_a_merged_tile_carries_the_sum() {
+    let tiling = layout_items(&[item("big", 7), item("small", 3)], rect(0, 0, 10, 4));
+    let weight = |name: &str| {
+        tiling
+            .tiles()
+            .iter()
+            .find(|t| t.path.as_path() == Path::new(name))
+            .map(|t| t.weight)
+    };
+    assert_eq!(weight("big"), Some(7));
+    assert_eq!(weight("small"), Some(3));
+    assert_eq!(
+        tiling.hit_tile(0, 0).map(|t| t.path.as_path()),
+        Some(Path::new("big"))
+    );
+
+    // 32x32 px allows 64 tiles; 100 files leave 37 in one merged tile.
+    let many: Vec<LayoutItem> = (0..100)
+        .map(|i| item(&format!("f{i:03}"), 1000 - i as u64))
+        .collect();
+    let total: u64 = many.iter().map(|i| i.weight).sum();
+    let tiling = layout_items(&many, rect(0, 0, 32, 32));
+    let merged: Vec<_> = tiling.tiles().iter().filter(|t| t.merged).collect();
+    assert_eq!(merged.len(), 1);
+    let placed: u64 = tiling.tiles().iter().map(|t| t.weight).sum();
+    assert_eq!(placed, total, "tile weights must account for every byte");
+    assert_eq!(
+        merged[0].weight,
+        (63..100).map(|i| 1000 - i as u64).sum::<u64>()
+    );
+}
