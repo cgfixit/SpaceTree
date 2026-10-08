@@ -41,6 +41,16 @@ open dist/SpaceTree.app
 
 Every merge to `main` whose checks all pass is published as a GitHub release by `.github/workflows/auto-release.yml`, tagged `v<version>-main.<date>.<sha>`. `release.yml` still publishes a named `v<version>` release on demand.
 
+## Repeatable scan comparison
+
+Build two revisions with separate `CARGO_TARGET_DIR` values, then run:
+
+```bash
+python3 scripts/bench-scan.py /path/to/baseline/spacetree /path/to/candidate/spacetree
+```
+
+The script creates and removes a temporary tree of 6,000 files, warms each binary once, alternates seven timed CLI scans, and rejects differing root byte totals or row counts. The median includes process startup and report formatting. This local fixture does not exercise USB or network-volume behavior.
+
 ## Continuous Development (kinda; im sure df can be formatted and used with fancy flags to look all pretty but I mean unless im literally using linux without x why would I act like thats better. Research that later to make sure im not missing out on things that are better than the GUI habit I keep vibe coding from windows concepts (shoutout to WinDirStat):
 
 - Add right-click -> open in finder option to every object
