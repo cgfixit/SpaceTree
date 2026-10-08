@@ -953,6 +953,22 @@ impl SpaceTreeApp {
             None => response,
         };
 
+        if response.secondary_clicked() {
+            self.selected = target.clone().filter(|_| !target_merged);
+        }
+        if self.selected.is_some() {
+            response.context_menu(|ui| {
+                if ui.button("Reveal in Finder").clicked() {
+                    self.reveal_selected();
+                    ui.close_menu();
+                }
+                if ui.button("Copy Path").clicked() {
+                    self.copy_selected(ui.ctx());
+                    ui.close_menu();
+                }
+            });
+        }
+
         if response.clicked() || response.double_clicked() {
             if let Some(path) = target {
                 let is_dir = self
