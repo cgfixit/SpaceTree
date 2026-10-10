@@ -4,7 +4,7 @@ SpaceTree is a macOS disk usage app. You pick a folder or a disk. The window lis
 
 ![CG Agent Harness running on macOS](/screenshots/treemap-table-folder-selection.png)
 
-- The table columns are Name, Size Proportion, Percentage, Physical Size, Logical Size, and Files. Percentage is that row's allocated bytes divided by the scan root. The scan root is 100%.
+- The table columns are Name, Size Proportion, Percentage, Physical Size, Logical Size, and Files. Percentage is that row's allocated bytes divided by the scan root. The scan root is 100%, except when scanning `/` or another local macOS volume root: only its Percentage cell is green and shows `~N% full`, based on volume capacity minus available space. Child rows and folder scans keep their scan-share percentages.
 - The treemap draws one rectangle per file. Area is allocated size. Color is the file extension. Each folder is outlined around its files; large folders carry a name and size label, and large files show their name and size. Hover a tile for its size, kind, and share of the view and of the scan. Double-click a folder (or its label) to zoom in. Double-click a file to reveal it in Finder. Right-click a table row, treemap tile, or folder label to reveal it in Finder or copy its path. The bar above the map shows the path you are in; click any part of it to jump back, or press Esc or Zoom out to go up one level. A single click selects a row and does not zoom; selecting a folder in the table outlines it in the map.
 - The legend lists the extension colors in the current scan with each one's size and share. Hover a legend row to highlight that extension in the map.
 

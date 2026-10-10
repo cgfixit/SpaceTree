@@ -87,6 +87,8 @@ struct ExtSum {
 pub struct ScanResult {
     pub root: Node,
     pub volume_total: u64,
+    /// Capacity minus available bytes, only for a scan of a local macOS volume root.
+    pub volume_used: Option<u64>,
     /// Failed directory reads or entry metadata reads. Zero means none were observed.
     pub error_count: u64,
 }
@@ -98,7 +100,8 @@ pub struct ScanResult {
 /// tracks used storage. Symlink leaves keep `lstat` length.
 pub fn scan(path: &Path) -> io::Result<ScanResult> {
     let lmeta = fs::symlink_metadata(path)?;
-    let volume_total = volume_total_bytes(path);
+    let volume = volume_space(path);
+    let volume_total = volume.total;
     let seen = Mutex::new(HashSet::new());
     let clones = CloneBook::default();
     let errors = AtomicU64::new(0);
@@ -117,6 +120,7 @@ pub fn scan(path: &Path) -> io::Result<ScanResult> {
     Ok(ScanResult {
         root,
         volume_total,
+        volume_used: volume.root_used,
         error_count: errors.into_inner(),
     })
 }
@@ -134,29 +138,66 @@ pub(crate) fn percent_of_disk(size: u64, volume_total: u64) -> f64 {
 /// macOS uses `statfs`: its block count is 64-bit. Darwin's `statvfs` stores
 /// `f_blocks` in a 32-bit `fsblkcnt_t`, which cannot describe a volume of
 /// 2^32 blocks or more (16 TiB at 4 KiB blocks).
-fn volume_total_bytes(path: &Path) -> u64 {
+#[derive(Default)]
+struct VolumeSpace {
+    total: u64,
+    root_used: Option<u64>,
+}
+
+fn volume_space(path: &Path) -> VolumeSpace {
     let c = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
         Ok(c) => c,
-        Err(_) => return 0,
+        Err(_) => return VolumeSpace::default(),
     };
     #[cfg(target_os = "macos")]
     unsafe {
         // SAFETY: `c` is a NUL-terminated path; `s` is a valid statfs out-param.
         let mut s: libc::statfs = std::mem::zeroed();
         if libc::statfs(c.as_ptr(), &mut s) != 0 {
-            return 0;
+            return VolumeSpace::default();
         }
-        s.f_blocks.saturating_mul(u64::from(s.f_bsize))
+        VolumeSpace {
+            total: s.f_blocks.saturating_mul(u64::from(s.f_bsize)),
+            root_used: local_volume_used(path, &s),
+        }
     }
     #[cfg(not(target_os = "macos"))]
     unsafe {
         // SAFETY: `c` is a NUL-terminated path; `s` is a valid statvfs out-param.
         let mut s: libc::statvfs = std::mem::zeroed();
         if libc::statvfs(c.as_ptr(), &mut s) != 0 {
-            return 0;
+            return VolumeSpace::default();
         }
-        (s.f_blocks as u64).saturating_mul(s.f_frsize as u64)
+        VolumeSpace {
+            total: (s.f_blocks as u64).saturating_mul(s.f_frsize as u64),
+            root_used: None,
+        }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn local_volume_used(path: &Path, space: &libc::statfs) -> Option<u64> {
+    if space.f_flags & libc::MNT_LOCAL as u32 == 0 || space.f_blocks == 0 || space.f_bsize == 0 {
+        return None;
+    }
+    let mount_bytes: Vec<u8> = space
+        .f_mntonname
+        .iter()
+        .take_while(|&&b| b != 0)
+        .map(|&b| b as u8)
+        .collect();
+    let mount = PathBuf::from(OsString::from_vec(mount_bytes));
+    if fs::canonicalize(path).ok()? != fs::canonicalize(mount).ok()? {
+        return None;
+    }
+    // APFS volumes share available container space. The boot snapshot's own
+    // allocated blocks do not describe how full the disk is.
+    Some(
+        space
+            .f_blocks
+            .saturating_sub(space.f_bavail)
+            .saturating_mul(u64::from(space.f_bsize)),
+    )
 }
 
 /// `st_dev` as the bulk reader reports it. Darwin's `dev_t` is a signed
@@ -964,4 +1005,66 @@ fn dominant_ext(totals: &BTreeMap<String, ExtSum>) -> String {
         }
     }
     best.map(|(key, _, _)| key.to_string()).unwrap_or_default()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod volume_tests {
+    use super::*;
+
+    fn root_stats() -> libc::statfs {
+        // SAFETY: all fields of statfs accept zero; fill the fields under test.
+        let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+        stats.f_mntonname[0] = b'/' as libc::c_char;
+        stats.f_flags = libc::MNT_LOCAL as u32;
+        stats.f_blocks = 1000;
+        stats.f_bsize = 4096;
+        stats.f_bavail = 400;
+        stats.f_bfree = 900;
+        stats
+    }
+
+    #[test]
+    fn volume_fullness_uses_available_container_space() {
+        let mut stats = root_stats();
+        assert_eq!(local_volume_used(Path::new("/"), &stats), Some(600 * 4096));
+        stats.f_bavail = 0;
+        assert_eq!(local_volume_used(Path::new("/"), &stats), Some(1000 * 4096));
+        stats.f_bavail = 1100;
+        assert_eq!(local_volume_used(Path::new("/"), &stats), Some(0));
+    }
+
+    #[test]
+    fn volume_fullness_requires_a_local_mount_root_and_valid_capacity() {
+        let mut stats = root_stats();
+        assert_eq!(local_volume_used(&std::env::temp_dir(), &stats), None);
+        assert_eq!(local_volume_used(Path::new("/dev/null"), &stats), None);
+        stats.f_flags = 0;
+        assert_eq!(local_volume_used(Path::new("/"), &stats), None);
+        stats.f_flags = libc::MNT_LOCAL as u32;
+        stats.f_blocks = 0;
+        assert_eq!(local_volume_used(Path::new("/"), &stats), None);
+        stats.f_blocks = 1000;
+        stats.f_bsize = 0;
+        assert_eq!(local_volume_used(Path::new("/"), &stats), None);
+    }
+
+    #[test]
+    fn volume_fullness_recognizes_live_boot_data_and_root_aliases() {
+        for path in ["/", "/System/Volumes/Data"] {
+            let volume = volume_space(Path::new(path));
+            assert!(volume.total > 0, "{path}");
+            assert!(
+                volume.root_used.is_some_and(|used| used <= volume.total),
+                "{path}"
+            );
+        }
+        let dir = std::env::temp_dir().join(format!("spacetree-volume-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let alias = dir.join("disk");
+        std::os::unix::fs::symlink("/", &alias).unwrap();
+        let used = local_volume_used(&alias, &root_stats());
+        fs::remove_file(alias).unwrap();
+        fs::remove_dir(dir).unwrap();
+        assert_eq!(used, Some(600 * 4096));
+    }
 }
