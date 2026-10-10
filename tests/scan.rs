@@ -217,6 +217,7 @@ fn dates_are_populated_and_distinct() {
 fn percent_of_overall_disk_uses_scan_volume_total() {
     let fix = build_fixture();
     let result = scan(&fix.root).unwrap();
+    assert_eq!(result.volume_used, None, "a folder is not a whole volume");
     assert!(
         result.volume_total > 0,
         "volume_total must be the live volume capacity"

@@ -494,10 +494,46 @@ impl SpaceTreeApp {
                                     proportion_bar(ui, node.size, root_size, &node.color_ext);
                                 });
                                 row.col(|ui| {
+                                    let volume_used = result
+                                        .volume_used
+                                        .filter(|_| node.path == result.root.path);
+                                    if volume_used.is_some() {
+                                        ui.painter().rect_filled(
+                                            ui.max_rect(),
+                                            0.0,
+                                            Color32::from_rgba_unmultiplied(70, 180, 95, 55),
+                                        );
+                                    }
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            ui.monospace(format_scan_share(node.size, root_size));
+                                            if let Some(used) = volume_used {
+                                                let percent = used as f64
+                                                    / result.volume_total as f64
+                                                    * 100.0;
+                                                let green = if ui.visuals().dark_mode {
+                                                    Color32::from_rgb(110, 220, 135)
+                                                } else {
+                                                    Color32::from_rgb(20, 110, 45)
+                                                };
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "~{percent:.0}% full"
+                                                    ))
+                                                    .monospace()
+                                                    .color(green),
+                                                )
+                                                .on_hover_text(format!(
+                                                    "Volume: {} used of {}; {} available",
+                                                    format_bytes(used),
+                                                    format_bytes(result.volume_total),
+                                                    format_bytes(result.volume_total - used),
+                                                ));
+                                            } else {
+                                                ui.monospace(format_scan_share(
+                                                    node.size, root_size,
+                                                ));
+                                            }
                                         },
                                     );
                                 });
