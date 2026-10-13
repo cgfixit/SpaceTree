@@ -1,0 +1,139 @@
+name: release-bundle
+
+# Manual: build SpaceTree.app fresh from the chosen ref and publish it as a
+# GitHub release asset. Unlike release.yml, it does not need a prior bundle run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.1.1 (leave empty for v<version>-manual.<date>.<sha7>)
+        required: false
+        type: string
+      draft:
+        description: Create the release as a draft
+        required: false
+        default: true
+        type: boolean
+      prerelease:
+        description: Mark the release as a prerelease
+        required: false
+        default: false
+        type: boolean
+      notes:
+        description: Optional extra release notes
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  bundle-release:
+    name: build and publish SpaceTree.app
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # 2026-09-12
+        with:
+          toolchain: stable
+
+      - name: Check tests pass before bundling
+        run: cargo test --locked --all-targets
+
+      - name: Bundle
+        env:
+          CARGO_TARGET_DIR: target/bundle
+        run: sh scripts/make-app.sh
+
+      - name: Verify and zip the bundle
+        id: pack
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          app="dist/SpaceTree.app"
+          bin="$app/Contents/MacOS/spacetree"
+          test -x "$bin"
+          test "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" = "com.cgfixit.spacetree"
+          codesign --verify --verbose=2 "$app"
+          version="$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")"
+          cargo_version="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
+          if [ "$version" != "$cargo_version" ]; then
+            echo "Info.plist $version does not match Cargo.toml $cargo_version" >&2
+            exit 1
+          fi
+          case "$(uname -m)" in
+            arm64) arch=arm64 ;;
+            x86_64) arch=x86_64 ;;
+            *) echo "unexpected arch $(uname -m)" >&2; exit 1 ;;
+          esac
+          sha7="$(git rev-parse --short=7 HEAD)"
+          if [ -n "$TAG_INPUT" ]; then
+            tag="$TAG_INPUT"
+          else
+            tag="v${version}-manual.$(date -u +%Y%m%d).${sha7}"
+          fi
+          case "$tag" in
+            v[0-9]*) ;;
+            *) echo "tag must start with v and a digit: $tag" >&2; exit 1 ;;
+          esac
+          if printf '%s' "$tag" | grep -Eq '[^A-Za-z0-9._-]'; then
+            echo "tag has characters outside A-Za-z0-9._-" >&2
+            exit 1
+          fi
+          zip="dist/SpaceTree-${version}-macos-${arch}.app.zip"
+          ditto -c -k --keepParent "$app" "$zip"
+          rm -rf "${RUNNER_TEMP}/unzip"
+          mkdir -p "${RUNNER_TEMP}/unzip"
+          ditto -x -k "$zip" "${RUNNER_TEMP}/unzip"
+          codesign --verify --verbose=2 "${RUNNER_TEMP}/unzip/SpaceTree.app"
+          {
+            echo "tag=$tag"
+            echo "zip=$zip"
+            echo "version=$version"
+            echo "arch=$arch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pack.outputs.tag }}
+          ZIP: ${{ steps.pack.outputs.zip }}
+          VERSION: ${{ steps.pack.outputs.version }}
+          ARCH: ${{ steps.pack.outputs.arch }}
+          DRAFT: ${{ inputs.draft }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists" >&2
+            exit 1
+          fi
+          notes="${RUNNER_TEMP}/notes.md"
+          {
+            printf 'SpaceTree %s for macOS (%s), built fresh by the release-bundle workflow.\n\n' "$VERSION" "$ARCH"
+            printf 'Commit: %s\n\n' "$GITHUB_SHA"
+            printf 'Ad-hoc signed with codesign --sign -. Not notarized.\n'
+            printf 'First launch: right-click SpaceTree.app and choose Open.\n'
+            printf 'Unzip with Finder, or: ditto -x -k <asset> .\n'
+            if [ -n "$NOTES" ]; then
+              printf '\n%s\n' "$NOTES"
+            fi
+          } > "$notes"
+          flags=()
+          if [ "$DRAFT" = "true" ]; then flags+=(--draft); fi
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "$ZIP" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "SpaceTree $VERSION ($TAG)" \
+            --notes-file "$notes" \
+            ${flags[@]+"${flags[@]}"}
