@@ -1,8 +1,12 @@
 # SpaceTree
 
-SpaceTree is a macOS disk usage app. You pick a folder or a disk. The window lists each child and draws a treemap of the same allocated bytes.
+SpaceTree is a macOS disk usage app in the spirit of WinDirStat: pick a folder or a whole disk, and see at a glance what is eating your space. A sortable table and a treemap show the same allocated bytes, so the biggest offenders stand out in seconds.
 
-![CG Agent Harness running on macOS](/screenshots/treemap-table-folder-selection.png)
+**Use it when** your disk is nearly full and you need to know which folder, file type, or forgotten download is responsible, before you decide what to remove. SpaceTree is read-only: it never deletes anything, and scans stay on your machine (no uploads, no telemetry).
+
+![SpaceTree showing a synthetic folder: table, extension legend, and treemap](screenshots/treemap-table-folder-selection.png)
+
+More captures are in [`screenshots/`](screenshots/). They use a synthetic tree, not real files.
 
 - The table columns are Name, Size Proportion, Percentage, Physical Size, Logical Size, and Files. Percentage is that row's allocated bytes divided by the scan root. The scan root is 100%, except when scanning `/` or another local macOS volume root: only its Percentage cell is green and shows `~N% full`, based on volume capacity minus available space. Child rows and folder scans keep their scan-share percentages.
 - The treemap draws one rectangle per file. Area is allocated size. Color is the file extension. Each folder is outlined around its files; large folders carry a name and size label, and large files show their name and size. Hover a tile for its size, kind, and share of the view and of the scan. Double-click a folder (or its label) to zoom in. Double-click a file to reveal it in Finder. Right-click a table row, treemap tile, or folder label to reveal it in Finder or copy its path. The bar above the map shows the path you are in; click any part of it to jump back, or press Esc or Zoom out to go up one level. A single click selects a row and does not zoom; selecting a folder in the table outlines it in the map.
@@ -50,12 +54,6 @@ python3 scripts/bench-scan.py /path/to/baseline/spacetree /path/to/candidate/spa
 ```
 
 The script creates and removes a temporary tree of 6,000 files, warms each binary once, alternates seven timed CLI scans, and rejects differing root byte totals or row counts. The median includes process startup and report formatting. This local fixture does not exercise USB or network-volume behavior.
-
-## Continuous Development (kinda; im sure df can be formatted and used with fancy flags to look all pretty but I mean unless im literally using linux without x why would I act like thats better. Research that later to make sure im not missing out on things that are better than the GUI habit I keep vibe coding from windows concepts (shoutout to WinDirStat):
-
-- make default zoom and column widths closer to what I'd set it to myself
-- See if theres a way to increase speed of scan without shortcuts
-- Resiliency testing for non internal drive (usb/network share/etc ...)
 
 ## Where the code lives
 

@@ -1,14 +1,21 @@
 # Screenshots
 
-`SpaceTree-9.28.26.jpeg` is the historical macOS screenshot from the README.
+`SpaceTree-9.28.26.jpeg` is the historical macOS screenshot. `before-treemap-main.png` shows an earlier treemap (unlabeled tiles, binary sizes labeled MB).
 
-The PNGs below show the treemap redesign on a synthetic tree (`/Users/demo/Synthetic`, about 110 MB in 520 files). They are egui renders under Xvfb on Linux, captured with XTest pointer input, not native macOS captures. Fonts and layout match egui on macOS; window chrome does not.
+The other PNGs are renders of the current UI on a synthetic tree (`/Users/demo/Synthetic`, about 110 MB in 520 generated files). They are egui renders under Xvfb on Linux with XTest pointer input, not native macOS captures: fonts and layout match egui on macOS, window chrome does not. Regenerate them with:
+
+```bash
+python3 scripts/make-synthetic-tree.py /Users/demo/Synthetic
+python3 scripts/capture-screenshots.py target/debug/spacetree /Users/demo/Synthetic screenshots
+```
+
+(needs Xvfb, ImageMagick `import`, and `pip install python-xlib`)
 
 | File | Shows |
 | --- | --- |
-| `before-treemap-main.png` | `main` before the change: unlabeled tiles, binary sizes labeled MB (104.6 "MB"). |
-| `treemap-hover-tooltip.png` | Folder outlines and labels, file names and sizes, hover tooltip. Decimal units (109.7 MB, as Finder shows). |
-| `treemap-legend-highlight.png` | Hovering `.wav` in the legend dims every other extension. |
+| `empty-state.png` | First launch: what the app does and how to start. |
 | `treemap-table-folder-selection.png` | Selecting `Archives` in the table outlines it in the map. |
+| `treemap-hover-tooltip.png` | Folder outlines and labels, file names and sizes, hover tooltip. |
+| `treemap-legend-highlight.png` | Hovering `.mp4` in the legend dims every other extension. |
 | `treemap-zoom-breadcrumb.png` | Double-clicking the `Photos` label zooms in; the breadcrumb shows `Synthetic › Photos`. |
 | `app-icon-256.png` | The app icon (`assets/icon.svg`) at 256 px. |

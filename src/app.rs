@@ -179,8 +179,26 @@ pub fn run() -> eframe::Result<()> {
     eframe::run_native(
         APP_TITLE,
         opts,
-        Box::new(|_cc| Ok(Box::new(SpaceTreeApp::new()))),
+        Box::new(|cc| {
+            polish_style(&cc.egui_ctx);
+            Ok(Box::new(SpaceTreeApp::new()))
+        }),
     )
+}
+
+/// Spacing, rounding, and selection color. Layout and information are unchanged.
+fn polish_style(ctx: &egui::Context) {
+    ctx.style_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(8.0, 5.0);
+        style.spacing.button_padding = egui::vec2(9.0, 3.0);
+        style.spacing.interact_size.y = 22.0;
+        let round = egui::CornerRadius::same(4);
+        style.visuals.widgets.inactive.corner_radius = round;
+        style.visuals.widgets.hovered.corner_radius = round;
+        style.visuals.widgets.active.corner_radius = round;
+        style.visuals.selection.bg_fill = Color32::from_rgb(28, 88, 128);
+        style.visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(190, 225, 245));
+    });
 }
 
 impl eframe::App for SpaceTreeApp {
@@ -244,7 +262,11 @@ impl eframe::App for SpaceTreeApp {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .add_enabled(!scanning, egui::Button::new("Scan"))
+                        .add_enabled(
+                            !scanning,
+                            egui::Button::new(egui::RichText::new("Scan").strong())
+                                .fill(Color32::from_rgb(28, 88, 128)),
+                        )
                         .clicked()
                         || enter
                     {
@@ -268,10 +290,11 @@ impl eframe::App for SpaceTreeApp {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| match &self.phase {
                 Phase::Scanning(path) => {
+                    ui.add(egui::Spinner::new().size(12.0));
                     ui.label(format!("Scanning… {}", path.display()));
                 }
                 Phase::Failed(e) => {
-                    ui.colored_label(Color32::RED, e);
+                    ui.colored_label(ERROR_FG, e);
                 }
                 Phase::Ready => {
                     if let Some(result) = &self.result {
@@ -320,15 +343,38 @@ impl eframe::App for SpaceTreeApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if !matches!(self.phase, Phase::Ready) {
-                match &self.phase {
-                    Phase::Scanning(path) => {
-                        ui.label(format!("Scanning… {}", path.display()));
+                ui.vertical_centered(|ui| {
+                    ui.add_space((ui.available_height() * 0.32).max(24.0));
+                    match &self.phase {
+                        Phase::Scanning(path) => {
+                            ui.add(egui::Spinner::new().size(28.0));
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new("Scanning…").size(18.0).strong());
+                            ui.label(egui::RichText::new(path.display().to_string()).weak());
+                        }
+                        Phase::Failed(e) => {
+                            ui.label(
+                                egui::RichText::new("Scan failed")
+                                    .size(18.0)
+                                    .strong()
+                                    .color(ERROR_FG),
+                            );
+                            ui.colored_label(ERROR_FG, e);
+                        }
+                        Phase::Idle => {
+                            ui.label(egui::RichText::new("SpaceTree").size(22.0).strong());
+                            ui.label(
+                                egui::RichText::new(
+                                    "See which folders and files hold your disk space.",
+                                )
+                                .weak(),
+                            );
+                            ui.add_space(6.0);
+                            ui.label("Enter a folder above (or Browse…) and press Scan.");
+                        }
+                        Phase::Ready => {}
                     }
-                    Phase::Failed(e) => {
-                        ui.colored_label(Color32::RED, e);
-                    }
-                    Phase::Idle | Phase::Ready => {}
-                }
+                });
                 return;
             }
             let full_h = ui.available_height().max(1.0);
@@ -1082,15 +1128,15 @@ fn format_percent(p: f64) -> String {
 
 fn proportion_bar(ui: &mut egui::Ui, size: u64, root_size: u64, key: &str) {
     let width = ui.available_width().max(4.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 12.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 11.0), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, 1.0, Color32::from_gray(55));
+    painter.rect_filled(rect, 3.0, Color32::from_gray(48));
     let fill_w = share_px(size, root_size, width.floor() as u32) as f32;
     if fill_w > 0.0 {
         let mut fill = rect;
         fill.set_width(fill_w.min(rect.width()));
         let rgb = ext_color(key);
-        painter.rect_filled(fill, 1.0, Color32::from_rgb(rgb.r, rgb.g, rgb.b));
+        painter.rect_filled(fill, 3.0, Color32::from_rgb(rgb.r, rgb.g, rgb.b));
     }
 }
 
@@ -1118,6 +1164,7 @@ const MAP_BG: Color32 = Color32::from_rgb(14, 16, 22);
 const FRAME_LINE: Color32 = Color32::from_rgb(8, 9, 12);
 const PILL_BG: Color32 = Color32::from_rgba_premultiplied(10, 12, 18, 200);
 const PILL_HOT: Color32 = Color32::from_rgba_premultiplied(40, 46, 62, 230);
+const ERROR_FG: Color32 = Color32::from_rgb(240, 98, 98);
 const SELECT: Color32 = Color32::from_rgb(255, 196, 64);
 
 /// Merged small items: slate with a fine hatch so it never reads as a file.
