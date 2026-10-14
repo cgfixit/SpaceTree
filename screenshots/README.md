@@ -2,14 +2,14 @@
 
 `SpaceTree-9.28.26.jpeg` is the historical macOS screenshot. `before-treemap-main.png` shows an earlier treemap (unlabeled tiles, binary sizes labeled MB).
 
-The other PNGs are renders of the current UI on a synthetic tree (`/Users/demo/Synthetic`, about 110 MB in 520 generated files). They are egui renders under Xvfb on Linux with XTest pointer input, not native macOS captures: fonts and layout match egui on macOS, window chrome does not. Regenerate them with:
+The other PNGs are renders of the current UI on a synthetic tree (`/Users/demo/Synthetic`, about 110 MB in 520 generated files). They are egui renders under Xvfb on Linux with XTest pointer input, not native macOS captures. The title bar, traffic lights and drop shadow are a mock-up added by `scripts/frame-screenshots.py`; the content inside the window is the real egui render. Fonts and layout match egui on macOS. Regenerate them with:
 
 ```bash
 python3 scripts/make-synthetic-tree.py /Users/demo/Synthetic
 python3 scripts/capture-screenshots.py target/debug/spacetree /Users/demo/Synthetic screenshots
 ```
 
-(needs Xvfb, ImageMagick `import`, and `pip install python-xlib`)
+(needs Xvfb, ImageMagick `import`, `pip install python-xlib pillow`; the capture script frames each PNG at the end)
 
 | File | Shows |
 | --- | --- |
