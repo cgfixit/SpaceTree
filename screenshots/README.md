@@ -11,6 +11,8 @@ python3 scripts/capture-screenshots.py target/debug/spacetree /Users/demo/Synthe
 
 (needs Xvfb, ImageMagick `import`, and `pip install python-xlib`)
 
+The green `~N% full` cell is not visible in these captures by design: it appears only when the scan root is `/` or another local macOS volume root, and these captures scan a synthetic folder on Linux.
+
 | File | Shows |
 | --- | --- |
 | `empty-state.png` | First launch: what the app does and how to start. |
