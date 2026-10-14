@@ -43,7 +43,7 @@ open dist/SpaceTree.app
 `scripts/make-app.sh` builds a release binary, copies `Info.plist`, builds `AppIcon.icns` from `assets/AppIcon.png`, and ad-hoc signs `dist/SpaceTree.app`. The icon source is `assets/icon.svg`; `node scripts/render-icon.cjs` re-renders the PNG (it needs Playwright). The bundle id is `com.cgfixit.spacetree`, version 0.1.0. The app is not signed with an Apple Developer ID. On first launch, right-click SpaceTree.app and choose Open, then confirm.
 
 
-Every merge to `main` whose checks all pass is published as a GitHub release by `.github/workflows/auto-release.yml`, tagged `v<version>-main.<date>.<sha>`. `release.yml` still publishes a named `v<version>` release on demand.
+Every merge to `main` whose checks all pass is published as a GitHub release by `.github/workflows/auto-release.yml`, tagged `v<version>-main.<date>.<sha>`. `release.yml` publishes a named `v<version>` release from the latest successful main bundle, and `release-bundle.yml` is a manual workflow that builds `SpaceTree.app` fresh from any ref and publishes it (as a draft by default) with a tag you choose.
 
 ## Repeatable scan comparison
 
