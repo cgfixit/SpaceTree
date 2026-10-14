@@ -13,6 +13,7 @@ SpaceTree is a Rust and `eframe` macOS disk usage viewer. A user selects a folde
 
 - Physical size is allocated bytes (`st_blocks * 512`); logical size is `st_size`. A directory sums its children. APFS clone accounting counts shared allocation once.
 - The scan can follow a user-selected root symlink to a directory. It does not follow child directory symlinks. It skips `/System/Volumes` unless that path is the scan root.
+- Keep the green whole-volume fullness cell: when the scan root is `/` or another local macOS volume root, only the root row's Percentage cell is green and shows `~N% full` (volume capacity minus available space; code: `volume_used` in `src/scan.rs`, drawn in `src/app.rs`). Child rows and folder scans keep scan-share percentages. Do not remove, restyle away, or repurpose it unless the operator says otherwise or the architecture changes dramatically.
 - Treemap area represents allocated size. Single click selects; double-click enters a folder or reveals a file in Finder. Table sorting and map selection must stay consistent.
 - Scanning and display are local. Use synthetic paths for tests and screenshots. Do not add uploads, telemetry, destructive file operations, or persistent records of scanned paths as incidental work.
 - Keep Finder calls argument based. Do not interpolate a path into a shell command.
