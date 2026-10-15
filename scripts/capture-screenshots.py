@@ -73,6 +73,8 @@ def main(binary, tree, out):
         time.sleep(0.6)
         shot(out, "treemap-zoom-breadcrumb.png")
         app.terminate(); app.wait()
+        pngs = [os.path.join(out, n) for n in os.listdir(out) if n.endswith(".png")]
+        subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "frame-screenshots.py"), *pngs], check=True)
     finally:
         xvfb.terminate()
 
