@@ -12,6 +12,7 @@ use eframe::egui::{
 use egui_extras::{Column, TableBuilder};
 
 use crate::finder::reveal_in_finder;
+use crate::scan::{scan_with_volume, volume_space, VolumeSpace};
 use crate::{
     ext_color, ext_description, ext_label, format_bytes, format_scan_share, layout_node, legend_of,
     share_px, sort_tree, LegendRow, Node, PxRect, ScanResult, SortColumn, Tiling,
@@ -40,11 +41,17 @@ struct FinishedScan {
     descending: bool,
 }
 
+enum ScanUpdate {
+    Volume(VolumeSpace),
+    Finished(Result<FinishedScan, String>),
+}
+
 struct SpaceTreeApp {
     path_text: String,
     phase: Phase,
     result: Option<ScanResult>,
-    rx: Option<Receiver<Result<FinishedScan, String>>>,
+    rx: Option<Receiver<ScanUpdate>>,
+    volume: VolumeSpace,
     expanded: HashSet<PathBuf>,
     sort: SortColumn,
     descending: bool,
@@ -69,6 +76,7 @@ impl SpaceTreeApp {
             phase: Phase::Idle,
             result: None,
             rx: None,
+            volume: VolumeSpace::default(),
             expanded: HashSet::new(),
             sort: SortColumn::Size,
             descending: true,
@@ -97,6 +105,7 @@ impl SpaceTreeApp {
         let path = PathBuf::from(trimmed);
         self.phase = Phase::Scanning(path.clone());
         self.result = None;
+        self.volume = VolumeSpace::default();
         self.selected = None;
         self.last_note = None;
         self.expanded.clear();
@@ -111,7 +120,12 @@ impl SpaceTreeApp {
         thread::Builder::new()
             .name("spacetree-scan".into())
             .spawn(move || {
-                let msg = match crate::scan(&path) {
+                // A whole-disk walk can take minutes. Show filesystem free space
+                // immediately; it does not depend on the walk's readable total.
+                let volume = volume_space(&path);
+                let _ = tx.send(ScanUpdate::Volume(volume));
+                ctx.request_repaint();
+                let msg = match scan_with_volume(&path, volume) {
                     Ok(mut result) => {
                         sort_tree(&mut result.root, sort, descending);
                         let legend = legend_of(&result.root);
@@ -124,7 +138,7 @@ impl SpaceTreeApp {
                     }
                     Err(e) => Err(format!("{}: {e}", path.display())),
                 };
-                let _ = tx.send(msg);
+                let _ = tx.send(ScanUpdate::Finished(msg));
                 ctx.request_repaint();
             })
             .expect("scan thread");
@@ -134,29 +148,38 @@ impl SpaceTreeApp {
         let Some(rx) = self.rx.take() else {
             return;
         };
-        match rx.try_recv() {
-            Ok(Ok(mut finished)) => {
-                if finished.sort != self.sort || finished.descending != self.descending {
-                    sort_tree(&mut finished.result.root, self.sort, self.descending);
+        loop {
+            match rx.try_recv() {
+                Ok(ScanUpdate::Volume(volume)) => self.volume = volume,
+                Ok(ScanUpdate::Finished(Ok(mut finished))) => {
+                    if finished.sort != self.sort || finished.descending != self.descending {
+                        sort_tree(&mut finished.result.root, self.sort, self.descending);
+                    }
+                    self.legend = finished.legend;
+                    self.zoom = None;
+                    self.generation = self.generation.wrapping_add(1);
+                    self.map_cache = None;
+                    self.expanded.clear();
+                    self.expanded.insert(finished.result.root.path.clone());
+                    self.result = Some(finished.result);
+                    self.phase = Phase::Ready;
+                    break;
                 }
-                self.legend = finished.legend;
-                self.zoom = None;
-                self.generation = self.generation.wrapping_add(1);
-                self.map_cache = None;
-                self.expanded.clear();
-                self.expanded.insert(finished.result.root.path.clone());
-                self.result = Some(finished.result);
-                self.phase = Phase::Ready;
-            }
-            Ok(Err(e)) => {
-                self.result = None;
-                self.phase = Phase::Failed(e);
-            }
-            Err(TryRecvError::Empty) => {
-                self.rx = Some(rx);
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.phase = Phase::Failed("scan thread ended unexpectedly".into());
+                Ok(ScanUpdate::Finished(Err(e))) => {
+                    self.result = None;
+                    self.volume = VolumeSpace::default();
+                    self.phase = Phase::Failed(e);
+                    break;
+                }
+                Err(TryRecvError::Empty) => {
+                    self.rx = Some(rx);
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.volume = VolumeSpace::default();
+                    self.phase = Phase::Failed("scan thread ended unexpectedly".into());
+                    break;
+                }
             }
         }
     }
@@ -288,6 +311,21 @@ impl eframe::App for SpaceTreeApp {
         });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            if let Some(used) = self.volume.root_used.filter(|_| self.volume.total > 0) {
+                let available = self.volume.total.saturating_sub(used);
+                let free_percent = available as f64 / self.volume.total as f64 * 100.0;
+                egui::Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(70, 180, 95, 55))
+                    .inner_margin(egui::vec2(5.0, 2.0))
+                    .show(ui, |ui| {
+                        ui.monospace(format!(
+                            "Whole volume: ~{free_percent:.0}% free ({} available of {})",
+                            format_bytes(available),
+                            format_bytes(self.volume.total),
+                        ))
+                        .on_hover_text("Filesystem available space at scan start, including APFS shared-container usage. Independent of unreadable paths in the scan.");
+                    });
+            }
             ui.horizontal(|ui| match &self.phase {
                 Phase::Scanning(path) => {
                     ui.add(egui::Spinner::new().size(12.0));

@@ -99,8 +99,12 @@ pub struct ScanResult {
 /// Size is allocated bytes (`st_blocks * 512`) for real files so `% of disk`
 /// tracks used storage. Symlink leaves keep `lstat` length.
 pub fn scan(path: &Path) -> io::Result<ScanResult> {
+    scan_with_volume(path, volume_space(path))
+}
+
+/// Reuse the metadata already sent to the UI before the directory walk starts.
+pub(crate) fn scan_with_volume(path: &Path, volume: VolumeSpace) -> io::Result<ScanResult> {
     let lmeta = fs::symlink_metadata(path)?;
-    let volume = volume_space(path);
     let volume_total = volume.total;
     let seen = Mutex::new(HashSet::new());
     let clones = CloneBook::default();
@@ -138,13 +142,13 @@ pub(crate) fn percent_of_disk(size: u64, volume_total: u64) -> f64 {
 /// macOS uses `statfs`: its block count is 64-bit. Darwin's `statvfs` stores
 /// `f_blocks` in a 32-bit `fsblkcnt_t`, which cannot describe a volume of
 /// 2^32 blocks or more (16 TiB at 4 KiB blocks).
-#[derive(Default)]
-struct VolumeSpace {
-    total: u64,
-    root_used: Option<u64>,
+#[derive(Clone, Copy, Default)]
+pub(crate) struct VolumeSpace {
+    pub(crate) total: u64,
+    pub(crate) root_used: Option<u64>,
 }
 
-fn volume_space(path: &Path) -> VolumeSpace {
+pub(crate) fn volume_space(path: &Path) -> VolumeSpace {
     let c = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
         Ok(c) => c,
         Err(_) => return VolumeSpace::default(),
