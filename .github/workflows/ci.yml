@@ -52,3 +52,10 @@ jobs:
       - name: Check sizes against stat, du, and df
         if: runner.os == 'macOS'
         run: ./scripts/verify-macos-sizes.sh target/debug/spacetree
+
+      - name: Reveal fixture paths in Finder and verify selection
+        if: runner.os == 'macOS'
+        timeout-minutes: 2
+        run: |
+          rustc --edition=2021 scripts/verify-finder.rs -o "$RUNNER_TEMP/spacetree-finder-runtime"
+          "$RUNNER_TEMP/spacetree-finder-runtime"
