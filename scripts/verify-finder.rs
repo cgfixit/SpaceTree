@@ -64,13 +64,12 @@ end run
             )
             .into());
         }
+        println!("Finder selected the requested fixture");
     }
-    // AppleScript paths are text, so verify raw bytes at the adapter boundary
-    // separately rather than claiming its selection query can round-trip them.
+    // APFS only creates valid UTF-8 names. Verify raw bytes at the adapter
+    // boundary without pretending Finder's text selection query can read them.
     let raw = fixture.0.join(OsString::from_vec(b"raw-\xff.txt".to_vec()));
-    fs::write(&raw, b"raw filename fixture\n")?;
     assert_eq!(finder::finder_open_args(&raw)[2], raw.as_os_str());
-    finder::reveal_in_finder(&raw)?;
     assert!(finder::reveal_in_finder(&fixture.0.join("missing-file")).is_err());
     println!("Finder runtime ok: file and folder selection; raw path argv; missing-path failure");
     Ok(())
