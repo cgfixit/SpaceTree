@@ -8,6 +8,12 @@ targets = [
 [advisories]
 yanked = "deny"
 ignore = [
+    # Temporary, reviewed upstream maintenance exceptions; revisit by 2026-11-15.
+    # These informational advisories have no patched standalone crate releases.
+    # Remove once eframe/accesskit and rfd/ashpd migrate to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant retired into zbus 6; current eframe 0.31 accessibility and rfd 0.15 Linux portals require zbus 4/5. Latest AccessKit 0.24.1 still requires zbus 5.19. Upstream https://github.com/z-galaxy/zbus/issues/2043; review by 2026-11-15." },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names retired into zbus 6; required by the same existing Linux-only zbus 4/5 dependency paths. Upstream https://github.com/z-galaxy/zbus/issues/2043; review by 2026-11-15." },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive retired into zbus 6; required by the same existing Linux-only zvariant 4/5 dependency paths. Upstream https://github.com/z-galaxy/zbus/issues/2043; review by 2026-11-15." },
     { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.30 is locked by eframe 0.31 accesskit. SpaceTree does not parse XML." },
     { id = "RUSTSEC-2026-0195", reason = "same quick-xml 0.30 pin. No upgrade without leaving eframe 0.31." },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25 has no published upgrade. egui uses it for bundled fonts." },
