@@ -508,6 +508,16 @@ impl SpaceTreeApp {
                                 let (node, depth) = visible[row.index()];
                                 let is_sel = selected.as_ref() == Some(&node.path);
                                 row.set_selected(is_sel);
+                                let mut path_menu = |ui: &mut egui::Ui| {
+                                    if ui.button("Reveal in Finder").clicked() {
+                                        ctx_reveal = Some(node.path.clone());
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Copy Path").clicked() {
+                                        ctx_copy = Some(node.path.clone());
+                                        ui.close_menu();
+                                    }
+                                };
                                 row.col(|ui| {
                                     ui.add_space(depth as f32 * 14.0);
                                     if node.is_dir {
@@ -521,6 +531,12 @@ impl SpaceTreeApp {
                                         if r.clicked() {
                                             toggles.push(node.path.clone());
                                         }
+                                        // This label owns its clicks, so the row
+                                        // response cannot open the menu for it.
+                                        if r.secondary_clicked() {
+                                            clicked = Some(node.path.clone());
+                                        }
+                                        r.context_menu(&mut path_menu);
                                     } else {
                                         ui.add_space(16.0);
                                         match fs::read_link(&node.path) {
@@ -610,22 +626,13 @@ impl SpaceTreeApp {
                                     );
                                 });
                                 let r = row.response();
-                                if r.clicked() {
+                                if r.clicked() || r.secondary_clicked() {
                                     clicked = Some(node.path.clone());
                                 }
                                 if r.double_clicked() {
                                     dbl = Some(node.path.clone());
                                 }
-                                r.context_menu(|ui| {
-                                    if ui.button("Reveal in Finder").clicked() {
-                                        ctx_reveal = Some(node.path.clone());
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Copy Path").clicked() {
-                                        ctx_copy = Some(node.path.clone());
-                                        ui.close_menu();
-                                    }
-                                });
+                                r.context_menu(path_menu);
                             });
                         });
                 });
