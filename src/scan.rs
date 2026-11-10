@@ -294,7 +294,11 @@ pub(crate) fn volume_space(path: &Path) -> VolumeSpace {
         VolumeSpace {
             total: s.f_blocks.saturating_mul(u64::from(s.f_bsize)),
             free: s.f_bavail.saturating_mul(u64::from(s.f_bsize)),
-            root_used: local_volume_used(path, &s, data.as_ref()),
+            root_used: local_volume_used(
+                path,
+                &s,
+                own_used(&s).saturating_add(data.as_ref().map_or(0, own_used)),
+            ),
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -328,33 +332,77 @@ fn statfs_of(path: &Path) -> Option<libc::statfs> {
     Some(s)
 }
 
-/// Bytes allocated to this volume alone. On APFS, `f_bfree` is capacity minus
-/// this volume's own blocks while `f_bavail` is the container's shared free
-/// space, so `df` shows a small Used for `/` next to a large Avail.
+/// Bytes allocated to this volume alone, as `df` shows in its Used column.
+///
+/// On APFS `statfs` cannot give this: `f_bfree` and `f_bavail` both hold the
+/// container's shared free space, so `f_blocks - f_bfree` is the whole
+/// container's usage for every volume in it. The volume's own figure is the
+/// `ATTR_VOL_SPACEUSED` attribute. File systems without it (HFS+, exFAT)
+/// keep one volume per partition, where `f_blocks - f_bfree` is correct.
 #[cfg(target_os = "macos")]
 fn own_used(s: &libc::statfs) -> u64 {
-    s.f_blocks
-        .saturating_sub(s.f_bfree)
-        .saturating_mul(u64::from(s.f_bsize))
+    vol_space_used(&mount_path(s)).unwrap_or_else(|| {
+        s.f_blocks
+            .saturating_sub(s.f_bfree)
+            .saturating_mul(u64::from(s.f_bsize))
+    })
 }
 
-/// Used bytes of the local volume mounted at `path`, plus its boot Data
-/// volume when `data` is given. `None` unless `path` is a local mount root.
 #[cfg(target_os = "macos")]
-fn local_volume_used(
-    path: &Path,
-    space: &libc::statfs,
-    data: Option<&libc::statfs>,
-) -> Option<u64> {
+fn vol_space_used(mount: &Path) -> Option<u64> {
+    const ATTR_VOL_SPACEUSED: u32 = 0x0080_0000;
+    const ATTR_VOL_INFO: u32 = 0x8000_0000;
+    let c = CString::new(mount.as_os_str().as_bytes()).ok()?;
+    let mut alist = AttrList {
+        bitmapcount: 5,
+        reserved: 0,
+        commonattr: 0,
+        volattr: ATTR_VOL_INFO | ATTR_VOL_SPACEUSED,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    // u_int32_t length, then the off_t value.
+    let mut buf = [0u8; 16];
+    extern "C" {
+        fn getattrlist(
+            path: *const libc::c_char,
+            attr_list: *mut libc::c_void,
+            attr_buf: *mut libc::c_void,
+            attr_buf_size: libc::size_t,
+            options: libc::c_ulong,
+        ) -> libc::c_int;
+    }
+    // SAFETY: `c` is NUL-terminated; `alist`/`buf` are valid out-params.
+    let rc = unsafe {
+        getattrlist(
+            c.as_ptr(),
+            (&mut alist as *mut AttrList).cast(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let len = u32::from_ne_bytes(buf[0..4].try_into().ok()?) as usize;
+    if len < 12 {
+        return None;
+    }
+    u64::try_from(i64::from_ne_bytes(buf[4..12].try_into().ok()?)).ok()
+}
+
+/// Used bytes of the local volume mounted at `path`, given `group_used`: its
+/// own used bytes plus, for `/`, its Data volume's. `None` unless `path` is a
+/// local mount root.
+#[cfg(target_os = "macos")]
+fn local_volume_used(path: &Path, space: &libc::statfs, group_used: u64) -> Option<u64> {
     if space.f_flags & libc::MNT_LOCAL as u32 == 0 || space.f_blocks == 0 || space.f_bsize == 0 {
         return None;
     }
     if fs::canonicalize(path).ok()? != fs::canonicalize(mount_path(space)).ok()? {
         return None;
-    }
-    let mut used = own_used(space);
-    if let Some(d) = data.filter(|d| d.f_bsize != 0) {
-        used = used.saturating_add(own_used(d));
     }
     // Everything not available is the most a volume group can use: other APFS
     // volumes (VM, Preboot, Recovery) share the container but are not Used
@@ -363,7 +411,7 @@ fn local_volume_used(
         .f_blocks
         .saturating_sub(space.f_bavail)
         .saturating_mul(u64::from(space.f_bsize));
-    Some(used.min(container_used))
+    Some(group_used.min(container_used))
 }
 
 /// `st_dev` as the bulk reader reports it. Darwin's `dev_t` is a signed
@@ -1172,24 +1220,15 @@ mod volume_tests {
     }
 
     #[test]
-    fn volume_used_counts_the_volume_group_not_the_whole_container() {
+    fn volume_used_is_the_group_figure_capped_at_container_usage() {
         let stats = root_stats();
-        // Own blocks: 1000 - 900 free = 100.
         assert_eq!(
-            local_volume_used(Path::new("/"), &stats, None),
-            Some(100 * 4096)
-        );
-        let mut data = root_stats();
-        data.f_bfree = 650;
-        // System 100 + Data 350.
-        assert_eq!(
-            local_volume_used(Path::new("/"), &stats, Some(&data)),
+            local_volume_used(Path::new("/"), &stats, 450 * 4096),
             Some(450 * 4096)
         );
         // Never more than the container has in use (1000 - 400 available).
-        data.f_bfree = 0;
         assert_eq!(
-            local_volume_used(Path::new("/"), &stats, Some(&data)),
+            local_volume_used(Path::new("/"), &stats, 900 * 4096),
             Some(600 * 4096)
         );
     }
@@ -1197,19 +1236,16 @@ mod volume_tests {
     #[test]
     fn volume_fullness_requires_a_local_mount_root_and_valid_capacity() {
         let mut stats = root_stats();
-        assert_eq!(local_volume_used(&std::env::temp_dir(), &stats, None), None);
-        assert_eq!(
-            local_volume_used(Path::new("/dev/null"), &stats, None),
-            None
-        );
+        assert_eq!(local_volume_used(&std::env::temp_dir(), &stats, 0), None);
+        assert_eq!(local_volume_used(Path::new("/dev/null"), &stats, 0), None);
         stats.f_flags = 0;
-        assert_eq!(local_volume_used(Path::new("/"), &stats, None), None);
+        assert_eq!(local_volume_used(Path::new("/"), &stats, 0), None);
         stats.f_flags = libc::MNT_LOCAL as u32;
         stats.f_blocks = 0;
-        assert_eq!(local_volume_used(Path::new("/"), &stats, None), None);
+        assert_eq!(local_volume_used(Path::new("/"), &stats, 0), None);
         stats.f_blocks = 1000;
         stats.f_bsize = 0;
-        assert_eq!(local_volume_used(Path::new("/"), &stats, None), None);
+        assert_eq!(local_volume_used(Path::new("/"), &stats, 0), None);
     }
 
     /// `df -k` prints Used as (f_blocks - f_bfree) in KiB for each volume.
@@ -1233,13 +1269,14 @@ mod volume_tests {
         let fields = |p: &str| {
             let s = statfs_of(Path::new(p)).unwrap();
             format!(
-                "{p}: mnt={} bsize={} blocks={} bfree={} bavail={} own_used={}",
+                "{p}: mnt={} bsize={} blocks={} bfree={} bavail={} own_used={} spaceused={:?}",
                 mount_path(&s).display(),
                 s.f_bsize,
                 s.f_blocks,
                 s.f_bfree,
                 s.f_bavail,
-                own_used(&s)
+                own_used(&s),
+                vol_space_used(Path::new(p))
             )
         };
         let df = std::process::Command::new("/bin/df")
@@ -1270,7 +1307,7 @@ mod volume_tests {
         fs::create_dir(&dir).unwrap();
         let alias = dir.join("disk");
         std::os::unix::fs::symlink("/", &alias).unwrap();
-        let used = local_volume_used(&alias, &root_stats(), None);
+        let used = local_volume_used(&alias, &root_stats(), 100 * 4096);
         fs::remove_file(alias).unwrap();
         fs::remove_dir(dir).unwrap();
         assert_eq!(used, Some(100 * 4096));
