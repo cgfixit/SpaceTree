@@ -1230,9 +1230,28 @@ mod volume_tests {
         let want = (df_used_kib("/") + df_used_kib("/System/Volumes/Data")) * 1024;
         // Each df figure is rounded to KiB, and the disk changes between calls.
         let slack = 256 * 1024 * 1024;
+        let fields = |p: &str| {
+            let s = statfs_of(Path::new(p)).unwrap();
+            format!(
+                "{p}: mnt={} bsize={} blocks={} bfree={} bavail={} own_used={}",
+                mount_path(&s).display(),
+                s.f_bsize,
+                s.f_blocks,
+                s.f_bfree,
+                s.f_bavail,
+                own_used(&s)
+            )
+        };
+        let df = std::process::Command::new("/bin/df")
+            .args(["-k", "/", "/System/Volumes/Data"])
+            .output()
+            .unwrap();
         assert!(
             used.abs_diff(want) <= slack,
-            "used {used} want df System+Data {want}"
+            "used {used} want df System+Data {want}\n{}\n{}\n{}",
+            fields("/"),
+            fields("/System/Volumes/Data"),
+            String::from_utf8_lossy(&df.stdout)
         );
         assert!(used + volume.free <= volume.total);
     }
