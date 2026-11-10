@@ -1,12 +1,16 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{Node, ScanResult};
+use crate::{Node, ScanResult, HIDDEN_KEY};
 
 /// Stable text dump of a scan for the `--scan` CLI and tests.
 pub fn format_scan(result: &ScanResult) -> String {
     let mut out = String::new();
     out.push_str(&format!("volume_total_bytes={}\n", result.volume_total));
     out.push_str(&format!("root_size_bytes={}\n", result.root.size));
+    if let Some(used) = result.volume_used {
+        out.push_str(&format!("volume_used_bytes={used}\n"));
+        out.push_str(&format!("hidden_bytes={}\n", result.hidden));
+    }
     if result.error_count > 0 {
         out.push_str(&format!("scan_incomplete_errors={}\n", result.error_count));
     }
@@ -18,7 +22,13 @@ fn push_node(out: &mut String, node: &Node, depth: usize) {
     for _ in 0..depth {
         out.push_str("  ");
     }
-    let kind = if node.is_dir { "dir" } else { "file" };
+    let kind = if node.is_dir {
+        "dir"
+    } else if node.color_ext == HIDDEN_KEY {
+        "hidden"
+    } else {
+        "file"
+    };
     out.push_str(&format!(
         "{}  {:.12}  {}  {}  {}  {}\n",
         node.size,

@@ -210,6 +210,10 @@ const FALLBACK: [Rgb; 12] = [
     },
 ];
 
+/// Color key of the synthetic `Hidden space` row: used bytes no file in the
+/// walk accounts for. `ext_key` never yields a `/`, so no file shares it.
+pub const HIDDEN_KEY: &str = "/hidden";
+
 pub fn ext_key(file_name: &str) -> String {
     let base = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
     let Some((stem, ext)) = base.rsplit_once('.') else {
@@ -228,7 +232,9 @@ pub fn ext_key(file_name: &str) -> String {
 }
 
 pub fn ext_label(key: &str) -> String {
-    if key.is_empty() {
+    if key == HIDDEN_KEY {
+        "Hidden space".to_string()
+    } else if key.is_empty() {
         "(none)".to_string()
     } else {
         format!(".{key}")
@@ -236,6 +242,9 @@ pub fn ext_label(key: &str) -> String {
 }
 
 pub fn ext_description(key: &str) -> String {
+    if key == HIDDEN_KEY {
+        return "Used space no file walk can see".to_string();
+    }
     if key.is_empty() {
         return "No Extension".to_string();
     }
@@ -246,6 +255,13 @@ pub fn ext_description(key: &str) -> String {
 }
 
 pub fn ext_color(key: &str) -> Rgb {
+    if key == HIDDEN_KEY {
+        return Rgb {
+            r: 52,
+            g: 56,
+            b: 66,
+        };
+    }
     if key.is_empty() {
         return Rgb {
             r: 168,
@@ -283,6 +299,10 @@ pub fn legend_of(root: &Node) -> Vec<LegendRow> {
             for child in &node.children {
                 walk(child, map);
             }
+            return;
+        }
+        // The legend lists file kinds; hidden space is not a file.
+        if node.color_ext == HIDDEN_KEY {
             return;
         }
         let entry = map.entry(node.color_ext.clone()).or_insert((0, 0));
