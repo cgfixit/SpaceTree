@@ -15,10 +15,14 @@ use crate::finder::reveal_in_finder;
 use crate::scan::{scan_with_volume, volume_space, VolumeSpace};
 use crate::{
     ext_color, ext_description, ext_label, format_bytes, format_scan_share, layout_node, legend_of,
-    share_px, sort_tree, LegendRow, Node, PxRect, ScanResult, SortColumn, Tiling,
+    share_px, sort_tree, LegendRow, Node, PxRect, ScanResult, SortColumn, Tiling, HIDDEN_KEY,
+    HIDDEN_NAME,
 };
 
 pub const APP_TITLE: &str = "SpaceTree";
+
+/// What the synthetic `Hidden space` row stands for.
+const HIDDEN_HELP: &str = "Space the volume reports in use that no readable file accounts for: local Time Machine snapshots, folders macOS keeps from this app (grant Full Disk Access to see more), and system-only data. It makes the total match Finder's Used.";
 
 enum Phase {
     Idle,
@@ -311,8 +315,8 @@ impl eframe::App for SpaceTreeApp {
         });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            if let Some(used) = self.volume.root_used.filter(|_| self.volume.total > 0) {
-                let available = self.volume.total.saturating_sub(used);
+            if self.volume.root_used.is_some() && self.volume.total > 0 {
+                let available = self.volume.free.min(self.volume.total);
                 let free_percent = available as f64 / self.volume.total as f64 * 100.0;
                 egui::Frame::NONE
                     .fill(Color32::from_rgba_unmultiplied(70, 180, 95, 55))
@@ -323,7 +327,7 @@ impl eframe::App for SpaceTreeApp {
                             format_bytes(available),
                             format_bytes(self.volume.total),
                         ))
-                        .on_hover_text("Filesystem available space at scan start, including APFS shared-container usage. Independent of unreadable paths in the scan.");
+                        .on_hover_text("Free space at scan start, shared by every volume in the APFS container. Finder's \"Available\" also counts purgeable space, so it can be larger.");
                     });
             }
             ui.horizontal(|ui| match &self.phase {
@@ -336,8 +340,14 @@ impl eframe::App for SpaceTreeApp {
                 }
                 Phase::Ready => {
                     if let Some(result) = &self.result {
-                        ui.label(format!("walkable {}", format_bytes(result.root.size)))
-                            .on_hover_text(format!("{} bytes", result.root.size));
+                        let walked = result.root.size.saturating_sub(result.hidden);
+                        ui.label(format!("in files {}", format_bytes(walked)))
+                            .on_hover_text(format!("{walked} bytes found by walking the folders"));
+                        if result.hidden > 0 {
+                            ui.separator();
+                            ui.label(format!("hidden {}", format_bytes(result.hidden)))
+                                .on_hover_text(HIDDEN_HELP);
+                        }
                         ui.separator();
                         ui.label(format!("volume {}", format_bytes(result.volume_total)))
                             .on_hover_text(format!("{} bytes", result.volume_total));
@@ -452,7 +462,21 @@ impl eframe::App for SpaceTreeApp {
 }
 
 impl SpaceTreeApp {
+    /// True when the selection is the synthetic `Hidden space` row.
+    fn selected_is_hidden(&self) -> bool {
+        let (Some(path), Some(result)) = (&self.selected, &self.result) else {
+            return false;
+        };
+        result.hidden > 0
+            && path.parent() == Some(result.root.path.as_path())
+            && find_node(&result.root, path).is_some_and(|n| n.color_ext == HIDDEN_KEY)
+    }
+
     fn copy_selected(&mut self, ctx: &egui::Context) {
+        if self.selected_is_hidden() {
+            self.last_note = Some(format!("{HIDDEN_NAME} has no path to copy"));
+            return;
+        }
         let Some(path) = &self.selected else {
             return;
         };
@@ -465,6 +489,10 @@ impl SpaceTreeApp {
         let Some(path) = &self.selected else {
             return;
         };
+        if self.selected_is_hidden() {
+            self.last_note = Some(format!("{HIDDEN_NAME} is not a file: {HIDDEN_HELP}"));
+            return;
+        }
         match reveal_in_finder(path) {
             Ok(()) => self.last_note = Some(format!("revealed {}", path.display())),
             Err(e) => self.last_note = Some(e),
@@ -624,10 +652,14 @@ impl SpaceTreeApp {
                                                     .color(green),
                                                 )
                                                 .on_hover_text(format!(
-                                                    "Volume: {} used of {}; {} available",
+                                                    "Volume: {} used of {} (Finder's Used); {} free now\n{} in files, {} hidden",
                                                     format_bytes(used),
                                                     format_bytes(result.volume_total),
-                                                    format_bytes(result.volume_total - used),
+                                                    format_bytes(result.volume_free),
+                                                    format_bytes(
+                                                        result.root.size.saturating_sub(result.hidden)
+                                                    ),
+                                                    format_bytes(result.hidden),
                                                 ));
                                             } else {
                                                 ui.monospace(format_scan_share(
@@ -902,7 +934,11 @@ impl SpaceTreeApp {
                 full
             };
             if tile.merged {
-                paint_other(&painter, paint, tile.weight);
+                paint_other(&painter, paint, "Other", tile.weight);
+                continue;
+            }
+            if tile.color_ext == HIDDEN_KEY {
+                paint_other(&painter, paint, HIDDEN_NAME, tile.weight);
                 continue;
             }
             let rgb = ext_color(&tile.color_ext);
@@ -965,7 +1001,7 @@ impl SpaceTreeApp {
             pills.push((pill, frame.path.as_path()));
         }
         for tile in tiling.tiles() {
-            if tile.merged || tile.rect.w < 64 || tile.rect.h < 30 {
+            if tile.merged || tile.color_ext == HIDDEN_KEY || tile.rect.w < 64 || tile.rect.h < 30 {
                 continue;
             }
             let r = screen_rect(tile.rect).shrink(5.0);
@@ -1213,7 +1249,7 @@ const ERROR_FG: Color32 = Color32::from_rgb(240, 98, 98);
 const SELECT: Color32 = Color32::from_rgb(255, 196, 64);
 
 /// Merged small items: slate with a fine hatch so it never reads as a file.
-fn paint_other(painter: &egui::Painter, rect: egui::Rect, weight: u64) {
+fn paint_other(painter: &egui::Painter, rect: egui::Rect, label: &str, weight: u64) {
     let painter = painter.with_clip_rect(rect);
     painter.rect_filled(rect, 0.0, Color32::from_rgb(52, 56, 66));
     let stroke = Stroke::new(1.0_f32, Color32::from_rgb(78, 84, 98));
@@ -1232,7 +1268,7 @@ fn paint_other(painter: &egui::Painter, rect: egui::Rect, weight: u64) {
         painter.text(
             rect.center() - egui::vec2(0.0, 7.0),
             Align2::CENTER_CENTER,
-            "Other",
+            label,
             FontId::proportional(12.0),
             Color32::WHITE,
         );
@@ -1247,7 +1283,7 @@ fn paint_other(painter: &egui::Painter, rect: egui::Rect, weight: u64) {
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
-            "Other",
+            label,
             FontId::proportional(11.0),
             Color32::WHITE,
         );
@@ -1329,7 +1365,14 @@ fn hover_lines(
         }
     }
     let mut lines = Vec::new();
-    if tile.merged {
+    if tile.color_ext == HIDDEN_KEY {
+        lines.push(HIDDEN_NAME.into());
+        lines.push(format!(
+            "{}  ·  used, not in any file",
+            format_bytes(tile.weight)
+        ));
+        lines.push(HIDDEN_HELP.into());
+    } else if tile.merged {
         lines.push("Other: smaller items".into());
         lines.push(format!(
             "{}  ·  allocated, combined",

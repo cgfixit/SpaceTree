@@ -17,7 +17,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use rayon::prelude::*;
 
-use crate::ext::ext_key;
+use crate::ext::{ext_key, HIDDEN_KEY};
 use crate::extents::ExtentLedger;
 
 /// One file or folder in the expandable tree.
@@ -87,8 +87,17 @@ struct ExtSum {
 pub struct ScanResult {
     pub root: Node,
     pub volume_total: u64,
-    /// Capacity minus available bytes, only for a scan of a local macOS volume root.
+    /// Bytes the volume reports in use, as Finder's Get Info "Used" counts
+    /// them, only for a scan of a local macOS volume root. For `/` this is the
+    /// System volume plus its Data volume.
     pub volume_used: Option<u64>,
+    /// Bytes free right now (`f_bavail`). macOS also lists purgeable space as
+    /// available, so Finder's "Available" can be larger.
+    pub volume_free: u64,
+    /// Part of `volume_used` that no file in the walk accounts for: local
+    /// snapshots, folders macOS does not let this process read, and
+    /// system-only data. Also present as the root's `Hidden space` child.
+    pub hidden: u64,
     /// Failed directory reads or entry metadata reads. Zero means none were observed.
     pub error_count: u64,
 }
@@ -104,17 +113,41 @@ pub fn scan(path: &Path) -> io::Result<ScanResult> {
 
 /// Reuse the metadata already sent to the UI before the directory walk starts.
 pub(crate) fn scan_with_volume(path: &Path, volume: VolumeSpace) -> io::Result<ScanResult> {
+    // A whole-volume scan stays on that volume, as Finder's numbers do: other
+    // disks under /Volumes, devfs, and disk images mounted inside it are not
+    // part of its used space.
+    let skip = if volume.root_used.is_some() {
+        foreign_mounts(path)
+    } else {
+        HashSet::new()
+    };
+    let mut result = scan_inner(path, volume, &skip)?;
+    if let Some(used) = volume.root_used {
+        add_hidden_space(&mut result, used);
+    }
+    Ok(result)
+}
+
+fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::Result<ScanResult> {
     let lmeta = fs::symlink_metadata(path)?;
     let volume_total = volume.total;
     let seen = Mutex::new(HashSet::new());
     let clones = CloneBook::default();
     let errors = AtomicU64::new(0);
+    let walk = Walk {
+        volume_total,
+        scan_root: path,
+        skip,
+        seen: &seen,
+        clones: &clones,
+        errors: &errors,
+    };
     let root = if lmeta.file_type().is_dir() {
-        walk_dir(path, &lmeta, volume_total, path, &seen, &clones, &errors)?.0
+        walk.dir(path, &lmeta)?.0
     } else if lmeta.file_type().is_symlink() {
         let followed = fs::metadata(path)?;
         if followed.is_dir() {
-            walk_dir(path, &followed, volume_total, path, &seen, &clones, &errors)?.0
+            walk.dir(path, &followed)?.0
         } else {
             leaf(path, &lmeta, volume_total, &clones).0
         }
@@ -125,8 +158,102 @@ pub(crate) fn scan_with_volume(path: &Path, volume: VolumeSpace) -> io::Result<S
         root,
         volume_total,
         volume_used: volume.root_used,
+        volume_free: volume.free,
+        hidden: 0,
         error_count: errors.into_inner(),
     })
+}
+
+/// Name and path leaf of the synthetic row that carries [`ScanResult::hidden`].
+pub const HIDDEN_NAME: &str = "Hidden space";
+
+/// Add the used bytes the walk could not see as one child of the root, so the
+/// root's total equals what macOS reports in use. A walk that found more than
+/// the volume reports (unreadable clone extents counted in full) adds nothing.
+fn add_hidden_space(result: &mut ScanResult, used: u64) {
+    let root = &mut result.root;
+    if !root.is_dir {
+        return;
+    }
+    let hidden = used.saturating_sub(root.size);
+    if hidden == 0 {
+        return;
+    }
+    result.hidden = hidden;
+    root.children.push(Node {
+        name: HIDDEN_NAME.to_string(),
+        path: root.path.join(HIDDEN_NAME),
+        is_dir: false,
+        size: hidden,
+        logical: 0,
+        files: 0,
+        color_ext: HIDDEN_KEY.to_string(),
+        modified: None,
+        created: None,
+        percent_of_disk: percent_of_disk(hidden, result.volume_total),
+        children: Vec::new(),
+    });
+    root.size = root.size.saturating_add(hidden);
+    root.percent_of_disk = percent_of_disk(root.size, result.volume_total);
+}
+
+/// Mount points other than the scan root's own volume, as both their mount
+/// path and, for the boot Data volume, the firmlinked path a walk of `/` uses.
+fn foreign_mounts(scan_root: &Path) -> HashSet<PathBuf> {
+    let Ok(root) = fs::canonicalize(scan_root) else {
+        return HashSet::new();
+    };
+    skip_set(&root, mount_points())
+}
+
+fn skip_set(root: &Path, mounts: Vec<PathBuf>) -> HashSet<PathBuf> {
+    let data = Path::new("/System/Volumes/Data");
+    let mut out = HashSet::new();
+    for mount in mounts {
+        if mount == root {
+            continue;
+        }
+        // /System/Volumes/Data/Volumes/X is reached as /Volumes/X through the
+        // firmlink when the scan root is `/`.
+        if root == Path::new("/") {
+            if let Ok(rel) = mount.strip_prefix(data) {
+                if !rel.as_os_str().is_empty() {
+                    out.insert(Path::new("/").join(rel));
+                }
+            }
+        }
+        out.insert(mount);
+    }
+    out
+}
+
+#[cfg(target_os = "macos")]
+fn mount_points() -> Vec<PathBuf> {
+    let mut list: *mut libc::statfs = std::ptr::null_mut();
+    // SAFETY: getmntinfo fills `list` with a buffer it owns; read `n` entries.
+    let n = unsafe { libc::getmntinfo(&mut list, libc::MNT_NOWAIT) };
+    if n <= 0 || list.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `list` points at `n` initialized statfs records.
+    let mounts = unsafe { std::slice::from_raw_parts(list, n as usize) };
+    mounts.iter().map(mount_path).collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mount_points() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+#[cfg(target_os = "macos")]
+fn mount_path(s: &libc::statfs) -> PathBuf {
+    let bytes: Vec<u8> = s
+        .f_mntonname
+        .iter()
+        .take_while(|&&b| b != 0)
+        .map(|&b| b as u8)
+        .collect();
+    PathBuf::from(OsString::from_vec(bytes))
 }
 
 pub(crate) fn percent_of_disk(size: u64, volume_total: u64) -> f64 {
@@ -137,7 +264,8 @@ pub(crate) fn percent_of_disk(size: u64, volume_total: u64) -> f64 {
     }
 }
 
-/// Capacity of the volume that holds `path`, as Finder reports it.
+/// Capacity, free space, and used space of the volume that holds `path`, as
+/// Finder reports them.
 ///
 /// macOS uses `statfs`: its block count is 64-bit. Darwin's `statvfs` stores
 /// `f_blocks` in a 32-bit `fsblkcnt_t`, which cannot describe a volume of
@@ -145,63 +273,145 @@ pub(crate) fn percent_of_disk(size: u64, volume_total: u64) -> f64 {
 #[derive(Clone, Copy, Default)]
 pub(crate) struct VolumeSpace {
     pub(crate) total: u64,
+    /// Bytes available to a non-root process now (`f_bavail`).
+    pub(crate) free: u64,
     pub(crate) root_used: Option<u64>,
 }
 
 pub(crate) fn volume_space(path: &Path) -> VolumeSpace {
-    let c = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
-        Ok(c) => c,
-        Err(_) => return VolumeSpace::default(),
-    };
     #[cfg(target_os = "macos")]
-    unsafe {
-        // SAFETY: `c` is a NUL-terminated path; `s` is a valid statfs out-param.
-        let mut s: libc::statfs = std::mem::zeroed();
-        if libc::statfs(c.as_ptr(), &mut s) != 0 {
+    {
+        let Some(s) = statfs_of(path) else {
             return VolumeSpace::default();
-        }
+        };
+        // The boot volume group: `/` is the sealed System volume, and the
+        // firmlinks under it (/Users, /Applications, ...) lead into the Data
+        // volume. Finder's "Used" for Macintosh HD counts both.
+        let data = (mount_path(&s) == Path::new("/"))
+            .then(|| statfs_of(Path::new("/System/Volumes/Data")))
+            .flatten()
+            .filter(|d| mount_path(d) == Path::new("/System/Volumes/Data"));
         VolumeSpace {
             total: s.f_blocks.saturating_mul(u64::from(s.f_bsize)),
-            root_used: local_volume_used(path, &s),
+            free: s.f_bavail.saturating_mul(u64::from(s.f_bsize)),
+            root_used: local_volume_used(
+                path,
+                &s,
+                own_used(&s).saturating_add(data.as_ref().map_or(0, own_used)),
+            ),
         }
     }
     #[cfg(not(target_os = "macos"))]
-    unsafe {
+    {
+        let c = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
+            Ok(c) => c,
+            Err(_) => return VolumeSpace::default(),
+        };
         // SAFETY: `c` is a NUL-terminated path; `s` is a valid statvfs out-param.
-        let mut s: libc::statvfs = std::mem::zeroed();
-        if libc::statvfs(c.as_ptr(), &mut s) != 0 {
+        let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
             return VolumeSpace::default();
         }
         VolumeSpace {
             total: (s.f_blocks as u64).saturating_mul(s.f_frsize as u64),
+            free: (s.f_bavail as u64).saturating_mul(s.f_frsize as u64),
             root_used: None,
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn local_volume_used(path: &Path, space: &libc::statfs) -> Option<u64> {
+fn statfs_of(path: &Path) -> Option<libc::statfs> {
+    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: all fields of statfs accept zero; statfs fills it.
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a NUL-terminated path; `s` is a valid statfs out-param.
+    if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
+        return None;
+    }
+    Some(s)
+}
+
+/// Bytes allocated to this volume alone, as `df` shows in its Used column.
+///
+/// On APFS `statfs` cannot give this: `f_bfree` and `f_bavail` both hold the
+/// container's shared free space, so `f_blocks - f_bfree` is the whole
+/// container's usage for every volume in it. The volume's own figure is the
+/// `ATTR_VOL_SPACEUSED` attribute. File systems without it (HFS+, exFAT)
+/// keep one volume per partition, where `f_blocks - f_bfree` is correct.
+#[cfg(target_os = "macos")]
+fn own_used(s: &libc::statfs) -> u64 {
+    vol_space_used(&mount_path(s)).unwrap_or_else(|| {
+        s.f_blocks
+            .saturating_sub(s.f_bfree)
+            .saturating_mul(u64::from(s.f_bsize))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn vol_space_used(mount: &Path) -> Option<u64> {
+    const ATTR_VOL_SPACEUSED: u32 = 0x0080_0000;
+    const ATTR_VOL_INFO: u32 = 0x8000_0000;
+    let c = CString::new(mount.as_os_str().as_bytes()).ok()?;
+    let mut alist = AttrList {
+        bitmapcount: 5,
+        reserved: 0,
+        commonattr: 0,
+        volattr: ATTR_VOL_INFO | ATTR_VOL_SPACEUSED,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    // u_int32_t length, then the off_t value.
+    let mut buf = [0u8; 16];
+    extern "C" {
+        fn getattrlist(
+            path: *const libc::c_char,
+            attr_list: *mut libc::c_void,
+            attr_buf: *mut libc::c_void,
+            attr_buf_size: libc::size_t,
+            options: libc::c_ulong,
+        ) -> libc::c_int;
+    }
+    // SAFETY: `c` is NUL-terminated; `alist`/`buf` are valid out-params.
+    let rc = unsafe {
+        getattrlist(
+            c.as_ptr(),
+            (&mut alist as *mut AttrList).cast(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let len = u32::from_ne_bytes(buf[0..4].try_into().ok()?) as usize;
+    if len < 12 {
+        return None;
+    }
+    u64::try_from(i64::from_ne_bytes(buf[4..12].try_into().ok()?)).ok()
+}
+
+/// Used bytes of the local volume mounted at `path`, given `group_used`: its
+/// own used bytes plus, for `/`, its Data volume's. `None` unless `path` is a
+/// local mount root.
+#[cfg(target_os = "macos")]
+fn local_volume_used(path: &Path, space: &libc::statfs, group_used: u64) -> Option<u64> {
     if space.f_flags & libc::MNT_LOCAL as u32 == 0 || space.f_blocks == 0 || space.f_bsize == 0 {
         return None;
     }
-    let mount_bytes: Vec<u8> = space
-        .f_mntonname
-        .iter()
-        .take_while(|&&b| b != 0)
-        .map(|&b| b as u8)
-        .collect();
-    let mount = PathBuf::from(OsString::from_vec(mount_bytes));
-    if fs::canonicalize(path).ok()? != fs::canonicalize(mount).ok()? {
+    if fs::canonicalize(path).ok()? != fs::canonicalize(mount_path(space)).ok()? {
         return None;
     }
-    // APFS volumes share available container space. The boot snapshot's own
-    // allocated blocks do not describe how full the disk is.
-    Some(
-        space
-            .f_blocks
-            .saturating_sub(space.f_bavail)
-            .saturating_mul(u64::from(space.f_bsize)),
-    )
+    // Everything not available is the most a volume group can use: other APFS
+    // volumes (VM, Preboot, Recovery) share the container but are not Used
+    // in Finder.
+    let container_used = space
+        .f_blocks
+        .saturating_sub(space.f_bavail)
+        .saturating_mul(u64::from(space.f_bsize));
+    Some(group_used.min(container_used))
 }
 
 /// `st_dev` as the bulk reader reports it. Darwin's `dev_t` is a signed
@@ -862,125 +1072,107 @@ fn insert_seen(seen: &Mutex<HashSet<(u64, u64)>>, dev: u64, ino: u64) -> bool {
         .insert((dev, ino))
 }
 
-fn walk_dir(
-    path: &Path,
-    meta: &Metadata,
+/// Shared state and settings of one scan.
+struct Walk<'a> {
     volume_total: u64,
-    scan_root: &Path,
-    seen: &Mutex<HashSet<(u64, u64)>>,
-    clones: &CloneBook,
-    errors: &AtomicU64,
-) -> io::Result<(Node, BTreeMap<String, ExtSum>)> {
-    walk_dir_known(
-        path,
-        meta.modified().ok(),
-        meta.created().ok(),
-        dev_id(meta),
-        meta.ino(),
-        volume_total,
-        scan_root,
-        seen,
-        clones,
-        errors,
-    )
+    scan_root: &'a Path,
+    /// Directories not to enter: mount points of other filesystems.
+    skip: &'a HashSet<PathBuf>,
+    seen: &'a Mutex<HashSet<(u64, u64)>>,
+    clones: &'a CloneBook,
+    errors: &'a AtomicU64,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn walk_dir_known(
-    path: &Path,
-    modified: Option<SystemTime>,
-    created: Option<SystemTime>,
-    dev: u64,
-    ino: u64,
-    volume_total: u64,
-    scan_root: &Path,
-    seen: &Mutex<HashSet<(u64, u64)>>,
-    clones: &CloneBook,
-    errors: &AtomicU64,
-) -> io::Result<(Node, BTreeMap<String, ExtSum>)> {
-    let _ = insert_seen(seen, dev, ino);
-    let mut children = Vec::new();
-    let mut by_ext: BTreeMap<String, ExtSum> = BTreeMap::new();
-    let mut subdirs = Vec::new();
-    let entries = match list_bulk(path, errors) {
-        Ok(entries) => entries,
-        Err(err) if path == scan_root => return Err(err),
-        Err(_) => {
-            errors.fetch_add(1, Ordering::Relaxed);
-            Vec::new()
-        }
-    };
-    for ent in entries {
-        let child = path.join(&ent.name);
-        if is_hidden_data_mount(scan_root, &child) {
-            continue;
-        }
-        if ent.objtype == VDIR {
-            if !insert_seen(seen, ent.dev, ent.ino) {
+impl Walk<'_> {
+    fn dir(&self, path: &Path, meta: &Metadata) -> io::Result<(Node, BTreeMap<String, ExtSum>)> {
+        self.dir_known(
+            path,
+            meta.modified().ok(),
+            meta.created().ok(),
+            dev_id(meta),
+            meta.ino(),
+        )
+    }
+
+    fn dir_known(
+        &self,
+        path: &Path,
+        modified: Option<SystemTime>,
+        created: Option<SystemTime>,
+        dev: u64,
+        ino: u64,
+    ) -> io::Result<(Node, BTreeMap<String, ExtSum>)> {
+        let _ = insert_seen(self.seen, dev, ino);
+        let mut children = Vec::new();
+        let mut by_ext: BTreeMap<String, ExtSum> = BTreeMap::new();
+        let mut subdirs = Vec::new();
+        let entries = match list_bulk(path, self.errors) {
+            Ok(entries) => entries,
+            Err(err) if path == self.scan_root => return Err(err),
+            Err(_) => {
+                self.errors.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
+        };
+        for ent in entries {
+            let child = path.join(&ent.name);
+            if is_hidden_data_mount(self.scan_root, &child) {
                 continue;
             }
-            subdirs.push(Subdir {
-                path: child,
-                modified: ent.modified,
-                created: ent.created,
-                dev: ent.dev,
-                ino: ent.ino,
-            });
-        } else {
-            children.push(leaf_from_bulk(
-                child,
-                &ent,
-                volume_total,
-                clones,
-                &mut by_ext,
-                errors,
-            ));
+            if ent.objtype == VDIR {
+                if self.skip.contains(&child) || !insert_seen(self.seen, ent.dev, ent.ino) {
+                    continue;
+                }
+                subdirs.push(Subdir {
+                    path: child,
+                    modified: ent.modified,
+                    created: ent.created,
+                    dev: ent.dev,
+                    ino: ent.ino,
+                });
+            } else {
+                children.push(leaf_from_bulk(
+                    child,
+                    &ent,
+                    self.volume_total,
+                    self.clones,
+                    &mut by_ext,
+                    self.errors,
+                ));
+            }
         }
+        let nested: Vec<(Node, BTreeMap<String, ExtSum>)> = subdirs
+            .into_par_iter()
+            .map(|sub| self.dir_known(&sub.path, sub.modified, sub.created, sub.dev, sub.ino))
+            .collect::<io::Result<_>>()?;
+        for (node, totals) in nested {
+            merge_ext(&mut by_ext, totals);
+            children.push(node);
+        }
+        let size: u64 = children.iter().map(|c| c.size).sum();
+        let logical = children
+            .iter()
+            .fold(0u64, |acc, c| acc.saturating_add(c.logical));
+        let files = children
+            .iter()
+            .fold(0u64, |acc, c| acc.saturating_add(c.files));
+        Ok((
+            Node {
+                name: node_name(path),
+                path: path.to_path_buf(),
+                is_dir: true,
+                size,
+                logical,
+                files,
+                color_ext: dominant_ext(&by_ext),
+                modified,
+                created,
+                percent_of_disk: percent_of_disk(size, self.volume_total),
+                children,
+            },
+            by_ext,
+        ))
     }
-    let nested: Vec<(Node, BTreeMap<String, ExtSum>)> = subdirs
-        .into_par_iter()
-        .map(|sub| {
-            walk_dir_known(
-                &sub.path,
-                sub.modified,
-                sub.created,
-                sub.dev,
-                sub.ino,
-                volume_total,
-                scan_root,
-                seen,
-                clones,
-                errors,
-            )
-        })
-        .collect::<io::Result<_>>()?;
-    for (node, totals) in nested {
-        merge_ext(&mut by_ext, totals);
-        children.push(node);
-    }
-    let size: u64 = children.iter().map(|c| c.size).sum();
-    let logical = children
-        .iter()
-        .fold(0u64, |acc, c| acc.saturating_add(c.logical));
-    let files = children
-        .iter()
-        .fold(0u64, |acc, c| acc.saturating_add(c.files));
-    Ok((
-        Node {
-            name: node_name(path),
-            path: path.to_path_buf(),
-            is_dir: true,
-            size,
-            logical,
-            files,
-            color_ext: dominant_ext(&by_ext),
-            modified,
-            created,
-            percent_of_disk: percent_of_disk(size, volume_total),
-            children,
-        },
-        by_ext,
-    ))
 }
 
 fn merge_ext(into: &mut BTreeMap<String, ExtSum>, from: BTreeMap<String, ExtSum>) {
@@ -1028,28 +1220,77 @@ mod volume_tests {
     }
 
     #[test]
-    fn volume_fullness_uses_available_container_space() {
-        let mut stats = root_stats();
-        assert_eq!(local_volume_used(Path::new("/"), &stats), Some(600 * 4096));
-        stats.f_bavail = 0;
-        assert_eq!(local_volume_used(Path::new("/"), &stats), Some(1000 * 4096));
-        stats.f_bavail = 1100;
-        assert_eq!(local_volume_used(Path::new("/"), &stats), Some(0));
+    fn volume_used_is_the_group_figure_capped_at_container_usage() {
+        let stats = root_stats();
+        assert_eq!(
+            local_volume_used(Path::new("/"), &stats, 450 * 4096),
+            Some(450 * 4096)
+        );
+        // Never more than the container has in use (1000 - 400 available).
+        assert_eq!(
+            local_volume_used(Path::new("/"), &stats, 900 * 4096),
+            Some(600 * 4096)
+        );
     }
 
     #[test]
     fn volume_fullness_requires_a_local_mount_root_and_valid_capacity() {
         let mut stats = root_stats();
-        assert_eq!(local_volume_used(&std::env::temp_dir(), &stats), None);
-        assert_eq!(local_volume_used(Path::new("/dev/null"), &stats), None);
+        assert_eq!(local_volume_used(&std::env::temp_dir(), &stats, 0), None);
+        assert_eq!(local_volume_used(Path::new("/dev/null"), &stats, 0), None);
         stats.f_flags = 0;
-        assert_eq!(local_volume_used(Path::new("/"), &stats), None);
+        assert_eq!(local_volume_used(Path::new("/"), &stats, 0), None);
         stats.f_flags = libc::MNT_LOCAL as u32;
         stats.f_blocks = 0;
-        assert_eq!(local_volume_used(Path::new("/"), &stats), None);
+        assert_eq!(local_volume_used(Path::new("/"), &stats, 0), None);
         stats.f_blocks = 1000;
         stats.f_bsize = 0;
-        assert_eq!(local_volume_used(Path::new("/"), &stats), None);
+        assert_eq!(local_volume_used(Path::new("/"), &stats, 0), None);
+    }
+
+    /// `df -k` prints Used as (f_blocks - f_bfree) in KiB for each volume.
+    fn df_used_kib(path: &str) -> u64 {
+        let out = std::process::Command::new("/bin/df")
+            .args(["-k", path])
+            .output()
+            .unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        let line = text.lines().nth(1).unwrap();
+        line.split_whitespace().nth(2).unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn boot_volume_used_matches_df_for_system_plus_data() {
+        let volume = volume_space(Path::new("/"));
+        let used = volume.root_used.unwrap();
+        let want = (df_used_kib("/") + df_used_kib("/System/Volumes/Data")) * 1024;
+        // Each df figure is rounded to KiB, and the disk changes between calls.
+        let slack = 256 * 1024 * 1024;
+        let fields = |p: &str| {
+            let s = statfs_of(Path::new(p)).unwrap();
+            format!(
+                "{p}: mnt={} bsize={} blocks={} bfree={} bavail={} own_used={} spaceused={:?}",
+                mount_path(&s).display(),
+                s.f_bsize,
+                s.f_blocks,
+                s.f_bfree,
+                s.f_bavail,
+                own_used(&s),
+                vol_space_used(Path::new(p))
+            )
+        };
+        let df = std::process::Command::new("/bin/df")
+            .args(["-k", "/", "/System/Volumes/Data"])
+            .output()
+            .unwrap();
+        assert!(
+            used.abs_diff(want) <= slack,
+            "used {used} want df System+Data {want}\n{}\n{}\n{}",
+            fields("/"),
+            fields("/System/Volumes/Data"),
+            String::from_utf8_lossy(&df.stdout)
+        );
+        assert!(used + volume.free <= volume.total);
     }
 
     #[test]
@@ -1066,9 +1307,85 @@ mod volume_tests {
         fs::create_dir(&dir).unwrap();
         let alias = dir.join("disk");
         std::os::unix::fs::symlink("/", &alias).unwrap();
-        let used = local_volume_used(&alias, &root_stats());
+        let used = local_volume_used(&alias, &root_stats(), 100 * 4096);
         fs::remove_file(alias).unwrap();
         fs::remove_dir(dir).unwrap();
-        assert_eq!(used, Some(600 * 4096));
+        assert_eq!(used, Some(100 * 4096));
+    }
+}
+
+#[cfg(test)]
+mod whole_volume_tests {
+    use super::*;
+
+    fn temp_tree() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "spacetree-whole-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("mnt/ext")).unwrap();
+        fs::write(dir.join("keep.bin"), vec![7u8; 8192]).unwrap();
+        fs::write(dir.join("mnt/ext/other_disk.bin"), vec![7u8; 65536]).unwrap();
+        dir
+    }
+
+    #[test]
+    fn skip_set_drops_the_root_and_maps_data_mounts_through_firmlinks() {
+        let mounts = vec![
+            PathBuf::from("/"),
+            PathBuf::from("/dev"),
+            PathBuf::from("/System/Volumes/Data"),
+            PathBuf::from("/System/Volumes/Data/Volumes/Ext"),
+        ];
+        let set = skip_set(Path::new("/"), mounts.clone());
+        assert!(!set.contains(Path::new("/")));
+        assert!(set.contains(Path::new("/dev")));
+        assert!(set.contains(Path::new("/Volumes/Ext")));
+        assert!(set.contains(Path::new("/System/Volumes/Data/Volumes/Ext")));
+        let set = skip_set(Path::new("/System/Volumes/Data"), mounts);
+        assert!(!set.contains(Path::new("/System/Volumes/Data")));
+        assert!(!set.contains(Path::new("/Volumes/Ext")));
+    }
+
+    #[test]
+    fn whole_volume_walk_skips_other_mounts_and_shows_hidden_space() {
+        let dir = temp_tree();
+        let skip: HashSet<PathBuf> = [dir.join("mnt/ext")].into_iter().collect();
+        let volume = VolumeSpace {
+            total: 1 << 30,
+            free: 1 << 29,
+            root_used: Some(1 << 20),
+        };
+        let mut result = scan_inner(&dir, volume, &skip).unwrap();
+        let walked = result.root.size;
+        let keep = fs::metadata(dir.join("keep.bin")).unwrap().blocks() * 512;
+        assert_eq!(walked, keep, "a skipped mount adds nothing");
+        add_hidden_space(&mut result, 1 << 20);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(result.root.size, 1 << 20, "root matches the volume's used");
+        assert_eq!(result.hidden, (1 << 20) - walked);
+        let hidden = result
+            .root
+            .children
+            .iter()
+            .find(|c| c.name == HIDDEN_NAME)
+            .unwrap();
+        assert_eq!(hidden.size, result.hidden);
+        assert_eq!(hidden.color_ext, HIDDEN_KEY);
+        assert_eq!(hidden.files, 0);
+    }
+
+    #[test]
+    fn walk_larger_than_used_adds_no_hidden_space() {
+        let dir = temp_tree();
+        let mut result = scan_inner(&dir, VolumeSpace::default(), &HashSet::new()).unwrap();
+        let walked = result.root.size;
+        add_hidden_space(&mut result, walked / 2);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(result.root.size, walked);
+        assert_eq!(result.hidden, 0);
+        assert!(result.root.children.iter().all(|c| c.name != HIDDEN_NAME));
     }
 }
