@@ -1,14 +1,16 @@
 name: auto-release
 
 # Publish the bundled app for the newest commit on main once every check on
-# that commit has passed. A bundle run finishing on main triggers it at once;
-# the schedule retries every three hours for checks that finish later, so a
-# green merge is released well within 24 hours. A newer merge supersedes an
-# unreleased older one, since the newer bundle contains it.
+# that commit has passed. A bundle or ci run finishing on main triggers it,
+# and the gate then waits up to 30 minutes for checks that are still running
+# (code scanning usually finishes after the bundle), so a green merge is
+# released within minutes. The schedule retries every three hours in case a
+# check took longer than that. A newer merge supersedes an unreleased older
+# one, since the newer bundle contains it.
 
 on:
   workflow_run:
-    workflows: [bundle]
+    workflows: [bundle, ci]
     types: [completed]
     branches: [main]
   schedule:
@@ -25,7 +27,7 @@ jobs:
   gate:
     name: auto-release gate
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 40
     permissions:
       contents: read
       actions: read
@@ -72,23 +74,36 @@ jobs:
             hold "$tag is already released."
           fi
 
-          runs="$(gh api --paginate "repos/$repo/commits/$sha/check-runs?per_page=100" \
-            --jq '.check_runs[] | {name, status, conclusion}' | jq -s \
-            '[.[] | select((.name | startswith("auto-release")) | not)
-                  | select(.name != "publish bundled app")]')"
-          if [ "$(printf '%s' "$runs" | jq length)" = "0" ]; then
-            hold "no checks have reported on $short yet."
-          fi
-          while IFS= read -r need; do
-            [ -n "$need" ] || continue
-            if [ "$(printf '%s' "$runs" | jq --arg n "$need" '[.[] | select(.name == $n)] | length')" = "0" ]; then
-              hold "required check '$need' has not reported on $short yet."
+          # Checks that have not reported or are still running get time to
+          # finish; a failed check holds the release at once.
+          deadline=$(( $(date +%s) + 1800 ))
+          while :; do
+            runs="$(gh api --paginate "repos/$repo/commits/$sha/check-runs?per_page=100" \
+              --jq '.check_runs[] | {name, status, conclusion}' | jq -s \
+              '[.[] | select((.name | startswith("auto-release")) | not)
+                    | select(.name != "publish bundled app")]')"
+            waiting=""
+            while IFS= read -r need; do
+              [ -n "$need" ] || continue
+              if [ "$(printf '%s' "$runs" | jq --arg n "$need" '[.[] | select(.name == $n)] | length')" = "0" ]; then
+                waiting="required check '$need' has not reported on $short yet."
+                break
+              fi
+            done <<< "$REQUIRED"
+            pending="$(printf '%s' "$runs" | jq -r '.[] | select(.status != "completed") | .name')"
+            if [ -z "$waiting" ] && [ -n "$pending" ]; then
+              waiting="still running on $short: $(printf '%s' "$pending" | paste -sd, -)."
             fi
-          done <<< "$REQUIRED"
-          pending="$(printf '%s' "$runs" | jq -r '.[] | select(.status != "completed") | .name')"
-          if [ -n "$pending" ]; then
-            hold "still running on $short: $(printf '%s' "$pending" | paste -sd, -)."
-          fi
+            [ -n "$waiting" ] || break
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              hold "$waiting"
+            fi
+            if [ "$(gh api "repos/$repo/commits/main" --jq .sha)" != "$sha" ]; then
+              hold "main moved past $short; the newer commit's run releases it."
+            fi
+            echo "Waiting: $waiting"
+            sleep 30
+          done
           failed="$(printf '%s' "$runs" | jq -r \
             '.[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")
                  | "\(.name)=\(.conclusion)"')"

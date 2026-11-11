@@ -63,6 +63,54 @@ vol=$(printf '%s\n' "$out" | awk -F= '/^volume_total_bytes=/{print $2}')
 df_bytes=$(( $(df -k "$plain" | awk 'NR==2{print $2}') * 1024 ))
 check "volume_total = df -k" "$df_bytes" "$vol"
 
+# Boot volume figures. Used is capacity minus macOS's Available (free plus
+# purgeable), as System Settings shows it; on disk is what df shows. Available
+# is kept only when it is above free space and within capacity.
+vout=$("$bin" --volume /)
+printf '%s\n' "$vout" | sed 's/^/info  /'
+field() { printf '%s\n' "$vout" | awk -F= -v k="$1" '$1 == k { print $2; exit }'; }
+vtotal=$(field volume_total_bytes)
+vfree=$(field volume_free_bytes)
+vused=$(field volume_used_bytes)
+vdisk=$(field volume_on_disk_bytes)
+vavail=$(field volume_available_bytes)
+check "boot volume_total = df -k" "$(( $(df -k / | awk 'NR==2{print $2}') * 1024 ))" "$vtotal"
+if [ -n "$vdisk" ] && [ $((vdisk + vfree)) -le "$vtotal" ]; then
+  printf 'ok    %-34s %s + %s <= %s\n' "boot on disk + free in capacity" "$vdisk" "$vfree" "$vtotal"
+else
+  printf 'FAIL  %-34s on_disk=%s free=%s total=%s\n' "boot on disk + free in capacity" "$vdisk" "$vfree" "$vtotal"
+  fail=1
+fi
+if [ -z "$vavail" ]; then
+  echo "note  macOS reports no purgeable space on / (nothing above free space)"
+  check "used = on disk" "$vdisk" "$vused"
+elif [ "$vavail" -gt "$vfree" ] && [ "$vavail" -le "$vtotal" ]; then
+  printf 'ok    %-34s %s < %s <= %s\n' "boot available = free + purgeable" "$vfree" "$vavail" "$vtotal"
+  check "purgeable = available - free" "$((vavail - vfree))" "$(field volume_purgeable_bytes)"
+  check "used = total - available" "$((vtotal - vavail))" "$vused"
+else
+  printf 'FAIL  %-34s free=%s available=%s total=%s\n' "boot available = free + purgeable" "$vfree" "$vavail" "$vtotal"
+  fail=1
+fi
+# Foundation's own answer for the same key, read a moment later.
+ref=$(osascript -l JavaScript -e 'ObjC.import("Foundation"); var u = $.NSURL.fileURLWithPath("/"); var v = Ref(); u.getResourceValueForKeyError(v, $.NSURLVolumeAvailableCapacityForImportantUsageKey, null); ObjC.unwrap(v[0])' 2>/dev/null || true)
+raw=$(field 'macos_available_bytes[/]')
+printf 'info  Foundation important-usage available on /: %s (spacetree read %s)\n' "${ref:-unavailable}" "${raw:-none}"
+case "$ref" in
+  ''|*[!0-9]*) ;;
+  *)
+    if [ "$raw" != none ] && [ -n "$raw" ]; then
+      diff=$((ref > raw ? ref - raw : raw - ref))
+      # Free space moves between the two reads.
+      if [ "$diff" -le $((512 * 1024 * 1024)) ]; then
+        printf 'ok    %-34s differs by %s bytes\n' "matches Foundation's figure" "$diff"
+      else
+        printf 'FAIL  %-34s spacetree %s Foundation %s\n' "matches Foundation's figure" "$raw" "$ref"
+        fail=1
+      fi
+    fi ;;
+esac
+
 # Symlinks count their lstat length (scan.rs documents this), not st_blocks.
 mkdir "$root/symlink"
 ln -s ../plain/rand.bin "$root/symlink/link.bin"

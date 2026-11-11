@@ -243,7 +243,7 @@ pub fn ext_label(key: &str) -> String {
 
 pub fn ext_description(key: &str) -> String {
     if key == HIDDEN_KEY {
-        return "Used space no file walk can see".to_string();
+        return "Used space this scan found in no file".to_string();
     }
     if key.is_empty() {
         return "No Extension".to_string();
