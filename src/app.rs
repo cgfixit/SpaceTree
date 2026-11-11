@@ -1,6 +1,6 @@
 //! Native window: path, background scan, size columns, and treemap.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -15,14 +15,14 @@ use crate::finder::reveal_in_finder;
 use crate::scan::{scan_with_volume, volume_space, VolumeSpace};
 use crate::{
     ext_color, ext_description, ext_label, format_bytes, format_scan_share, layout_node, legend_of,
-    share_px, sort_tree, LegendRow, Node, PxRect, ScanResult, SortColumn, Tiling, HIDDEN_KEY,
-    HIDDEN_NAME,
+    share_px, sort_tree, BlobNote, LegendRow, Node, PxRect, ScanResult, SortColumn, Tiling,
+    HIDDEN_KEY, HIDDEN_NAME,
 };
 
 pub const APP_TITLE: &str = "SpaceTree";
 
 /// What the synthetic `Hidden space` row stands for.
-const HIDDEN_HELP: &str = "Space in use on this volume that the scan found in no file it could read: local snapshots, folders macOS did not let SpaceTree read, and system data outside the scanned folders. With it, the root row equals the volume's used space on disk. To move more of it into folders, turn on Full Disk Access for SpaceTree in System Settings › Privacy & Security, then scan again.";
+const HIDDEN_HELP: &str = "Space macOS counts as used on this volume that the scan found in no file it could read: folders macOS did not let SpaceTree read, local snapshots, and system data outside the scanned folders. With it, the root row equals the used space System Settings shows. To move more of it into folders, turn on Full Disk Access for SpaceTree in System Settings › Privacy & Security, then scan again.";
 
 enum Phase {
     Idle,
@@ -41,6 +41,7 @@ struct MapCache {
 struct FinishedScan {
     result: ScanResult,
     legend: Vec<LegendRow>,
+    ollama: BTreeMap<PathBuf, BlobNote>,
     sort: SortColumn,
     descending: bool,
 }
@@ -65,6 +66,8 @@ struct SpaceTreeApp {
     last_note: Option<String>,
     split_top: f32,
     legend: Vec<LegendRow>,
+    /// Which Ollama model each blob file in the scan belongs to.
+    ollama: BTreeMap<PathBuf, BlobNote>,
     generation: u64,
     map_cache: Option<MapCache>,
     zoom: Option<PathBuf>,
@@ -90,6 +93,7 @@ impl SpaceTreeApp {
             last_note: None,
             split_top: 0.42,
             legend: Vec::new(),
+            ollama: BTreeMap::new(),
             generation: 0,
             map_cache: None,
             zoom: None,
@@ -114,6 +118,7 @@ impl SpaceTreeApp {
         self.last_note = None;
         self.expanded.clear();
         self.legend.clear();
+        self.ollama.clear();
         self.map_cache = None;
         self.zoom = None;
         let (tx, rx) = mpsc::channel();
@@ -133,9 +138,11 @@ impl SpaceTreeApp {
                     Ok(mut result) => {
                         sort_tree(&mut result.root, sort, descending);
                         let legend = legend_of(&result.root);
+                        let ollama = crate::blob_notes(&result.root);
                         Ok(FinishedScan {
                             result,
                             legend,
+                            ollama,
                             sort,
                             descending,
                         })
@@ -160,6 +167,7 @@ impl SpaceTreeApp {
                         sort_tree(&mut finished.result.root, self.sort, self.descending);
                     }
                     self.legend = finished.legend;
+                    self.ollama = finished.ollama;
                     self.zoom = None;
                     self.generation = self.generation.wrapping_add(1);
                     self.map_cache = None;
@@ -325,7 +333,7 @@ impl eframe::App for SpaceTreeApp {
                             self.volume.free,
                             self.volume.available,
                         ))
-                        .on_hover_text("Free now is space nothing occupies at scan start, shared by every volume in the APFS container. Available is what macOS shows in Finder and System Settings: free space plus purgeable space, which is in use on disk until macOS clears it to make room (local snapshots, caches, files iCloud also holds).");
+                        .on_hover_text("Available at scan start, as System Settings and Finder show it: space nothing occupies plus purgeable space, which stays on disk until macOS clears it to make room (local snapshots, caches, files iCloud also holds).");
                     });
             }
             ui.horizontal(|ui| match &self.phase {
@@ -348,9 +356,9 @@ impl eframe::App for SpaceTreeApp {
                         }
                         ui.separator();
                         if let Some(used) = result.volume_used {
-                            ui.label(format!("on disk {}", format_bytes(used)))
+                            ui.label(format!("used {}", format_bytes(used)))
                                 .on_hover_text(format!(
-                                    "{used} bytes in use on this volume, purgeable space included"
+                                    "{used} bytes used, as System Settings shows it"
                                 ));
                             ui.separator();
                             ui.label(format!("capacity {}", format_bytes(result.volume_total)))
@@ -528,6 +536,7 @@ impl SpaceTreeApp {
             let Some(result) = &self.result else {
                 return;
             };
+            let ollama = &self.ollama;
             let mut visible = Vec::new();
             flatten(&result.root, 0, &self.expanded, &mut visible);
             let selected = self.selected.clone();
@@ -629,6 +638,17 @@ impl SpaceTreeApp {
                                                     weak,
                                                     format!("{} → {}", node.name, target.display()),
                                                 );
+                                            }
+                                            Err(_) if ollama.contains_key(&node.path) => {
+                                                let note = &ollama[&node.path];
+                                                ui.add(
+                                                    Label::new(format!(
+                                                        "{}  ·  {}",
+                                                        note.label, node.name
+                                                    ))
+                                                    .truncate(),
+                                                )
+                                                .on_hover_text(note.detail.join("\n"));
                                             }
                                             Err(_) if node.color_ext == HIDDEN_KEY => {
                                                 ui.add(Label::new(&node.name).truncate())
@@ -1026,7 +1046,10 @@ impl SpaceTreeApp {
             };
             let name = one_line(
                 &painter,
-                file_name(&tile.path),
+                match self.ollama.get(&tile.path) {
+                    Some(note) => note.label.clone(),
+                    None => file_name(&tile.path),
+                },
                 FontId::proportional(12.0),
                 ink,
                 r.width(),
@@ -1103,13 +1126,20 @@ impl SpaceTreeApp {
                 .map(|(_, path)| path.to_path_buf())
         });
         let tip = hovered_tile.map(|tile| {
-            hover_lines(
+            let mut lines = hover_lines(
                 tile,
                 pill_hit.as_deref(),
                 hovered_top,
                 focus_size,
                 root_size,
-            )
+            );
+            // The tile itself, not a folder label over it or a merged tail.
+            if pill_hit.is_none() && !tile.merged {
+                if let Some(note) = self.ollama.get(&tile.path) {
+                    lines.extend(note.detail.iter().cloned());
+                }
+            }
+            lines
         });
         let target = pill_hit
             .clone()
@@ -1354,64 +1384,56 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// The line shown as soon as a whole-volume scan starts: free space now, and
-/// macOS's Available when it counts purgeable space on top of that.
+/// The line shown as soon as a whole-volume scan starts: what macOS counts
+/// as available, or plain free space when it gives no such figure.
 fn volume_summary(total: u64, free: u64, available: Option<u64>) -> String {
     let free = free.min(total);
     let percent = |bytes: u64| bytes as f64 / total as f64 * 100.0;
-    let mut line = format!(
-        "Whole volume: ~{:.0}% free now ({} of {})",
-        percent(free),
-        format_bytes(free),
-        format_bytes(total)
-    );
-    if let Some(available) = available {
-        line.push_str(&format!(
-            "  ·  macOS: {} available (~{:.0}%), ~{} of it purgeable",
-            format_bytes(available),
+    match available {
+        Some(available) => format!(
+            "Whole volume: ~{:.0}% free ({} available of {}, ~{} of it purgeable)",
             percent(available),
+            format_bytes(available),
+            format_bytes(total),
             format_bytes(available.saturating_sub(free))
-        ));
+        ),
+        None => format!(
+            "Whole volume: ~{:.0}% free ({} available of {})",
+            percent(free),
+            format_bytes(free),
+            format_bytes(total)
+        ),
     }
-    line
 }
 
-/// Tooltip of the green `~N% full` cell: where the on-disk figure comes from
-/// and why System Settings can show a lower one.
+/// Tooltip of the green `~N% full` cell: the figures behind it.
 fn fullness_help(result: &ScanResult, used: u64) -> String {
-    let total = result.volume_total;
     let mut lines = vec![
         format!(
-            "On disk: {} used of {}",
+            "Used: {} of {}, as System Settings shows it",
             format_bytes(used),
-            format_bytes(total)
+            format_bytes(result.volume_total)
         ),
         format!(
             "{} in files read  ·  {} hidden",
             format_bytes(result.root.size.saturating_sub(result.hidden)),
             format_bytes(result.hidden)
         ),
-        format!(
-            "Free now: {}  ·  other volumes on this disk: {}",
-            format_bytes(result.volume_free),
-            format_bytes(
-                total
-                    .saturating_sub(result.volume_free)
-                    .saturating_sub(used)
-            )
-        ),
     ];
     match result.volume_available {
         Some(available) => lines.push(format!(
-            "macOS counts ~{} of the used space as purgeable and so as available: {} available, {} used (~{:.0}% full), the figures System Settings shows",
-            format_bytes(available.saturating_sub(result.volume_free)),
+            "Available: {} ({} free now + ~{} purgeable)",
             format_bytes(available),
-            format_bytes(total.saturating_sub(available)),
-            total.saturating_sub(available) as f64 / total as f64 * 100.0
+            format_bytes(result.volume_free),
+            format_bytes(available.saturating_sub(result.volume_free))
         )),
-        None => lines.push(
-            "System Settings can show less used: it counts purgeable space as available".into(),
-        ),
+        None => lines.push(format!("Free now: {}", format_bytes(result.volume_free))),
+    }
+    if let Some(on_disk) = result.volume_on_disk.filter(|&bytes| bytes != used) {
+        lines.push(format!(
+            "On disk: {} for this volume, purgeable space included (what df shows)",
+            format_bytes(on_disk)
+        ));
     }
     lines.join("\n")
 }
@@ -1443,7 +1465,7 @@ fn hover_lines(
     if tile.color_ext == HIDDEN_KEY {
         lines.push(HIDDEN_NAME.into());
         lines.push(format!(
-            "{}  ·  in use on disk, in no file this scan read",
+            "{}  ·  used, in no file this scan read",
             format_bytes(tile.weight)
         ));
         lines.push(HIDDEN_HELP.into());

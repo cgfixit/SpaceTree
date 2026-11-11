@@ -87,11 +87,14 @@ struct ExtSum {
 pub struct ScanResult {
     pub root: Node,
     pub volume_total: u64,
-    /// Bytes the volume holds on disk, as `df` prints in its Used column, only
-    /// for a scan of a local macOS volume root. For `/` this is the System
-    /// volume plus its Data volume. Purgeable space is part of it, so System
-    /// Settings, which counts that space as available, shows less.
+    /// Used bytes as System Settings shows them, only for a scan of a local
+    /// macOS volume root: capacity minus `volume_available`. Without an
+    /// Available figure from macOS this is `volume_on_disk`.
     pub volume_used: Option<u64>,
+    /// Bytes the volume holds on disk, as `df` prints in its Used column. For
+    /// `/` this is the System volume plus its Data volume. Purgeable space is
+    /// part of it, so it can exceed `volume_used`.
+    pub volume_on_disk: Option<u64>,
     /// Bytes not allocated right now (`f_bavail`), shared by every volume in
     /// an APFS container.
     pub volume_free: u64,
@@ -133,7 +136,7 @@ pub(crate) fn scan_with_volume(path: &Path, volume: VolumeSpace) -> io::Result<S
         HashSet::new()
     };
     let mut result = scan_inner(path, volume, &skip)?;
-    if let Some(used) = volume.root_used {
+    if let Some(used) = volume.shown_used() {
         add_hidden_space(&mut result, used);
     }
     Ok(result)
@@ -168,7 +171,8 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
     Ok(ScanResult {
         root,
         volume_total,
-        volume_used: volume.root_used,
+        volume_used: volume.shown_used(),
+        volume_on_disk: volume.root_used,
         volume_free: volume.free,
         volume_available: volume.available,
         hidden: 0,
@@ -180,7 +184,7 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
 pub const HIDDEN_NAME: &str = "Hidden space";
 
 /// Add the used bytes the walk could not see as one child of the root, so the
-/// root's total equals the volume's on-disk used bytes. A walk that found more than
+/// root's total equals the used space macOS shows. A walk that found more than
 /// the volume reports (unreadable clone extents counted in full) adds nothing.
 fn add_hidden_space(result: &mut ScanResult, used: u64) {
     let root = &mut result.root;
@@ -288,7 +292,19 @@ pub(crate) struct VolumeSpace {
     pub(crate) free: u64,
     /// See [`ScanResult::volume_available`].
     pub(crate) available: Option<u64>,
+    /// See [`ScanResult::volume_on_disk`].
     pub(crate) root_used: Option<u64>,
+}
+
+impl VolumeSpace {
+    /// See [`ScanResult::volume_used`].
+    pub(crate) fn shown_used(&self) -> Option<u64> {
+        let on_disk = self.root_used?;
+        Some(match self.available {
+            Some(available) => self.total.saturating_sub(available),
+            None => on_disk,
+        })
+    }
 }
 
 /// macOS's Available figure, kept only when it says more than `free` does. A
@@ -1545,6 +1561,13 @@ mod whole_volume_tests {
         assert_eq!(hidden.color_ext, HIDDEN_KEY);
         assert_eq!(hidden.files, 0);
         assert_eq!(result.volume_purgeable(), Some(1 << 28));
+        assert_eq!(result.volume_on_disk, Some(1 << 20));
+        assert_eq!(result.volume_used, Some(1 << 28), "capacity - available");
+        let unknown = VolumeSpace {
+            available: None,
+            ..volume
+        };
+        assert_eq!(unknown.shown_used(), Some(1 << 20), "falls back to on disk");
     }
 
     #[test]

@@ -35,10 +35,28 @@ fn main() {
         print!("{}", spacetree::format_volume(std::path::Path::new(&path)));
         return;
     }
+    if let Some(i) = args.iter().position(|a| a == "--ollama") {
+        let dir = match args.get(i + 1) {
+            Some(dir) => Some(std::path::PathBuf::from(dir)),
+            None => spacetree::default_models_dir(),
+        };
+        let report = dir
+            .ok_or_else(|| "no models directory: set OLLAMA_MODELS or pass a path".to_string())
+            .and_then(|dir| spacetree::format_ollama(&dir));
+        match report {
+            Ok(text) => print!("{text}"),
+            Err(e) => {
+                eprintln!("ollama report failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!("SpaceTree — macOS disk usage analyzer");
         eprintln!("  spacetree --scan <path>       print expandable tree");
         eprintln!("  spacetree --volume [path]     print the volume's size figures, no scan");
+        eprintln!("  spacetree --ollama [dir]      list Ollama models with their blobs, read-only");
         eprintln!("  spacetree --gui-scan <path>   open the GUI and scan");
         eprintln!("  spacetree                     open the GUI");
         return;

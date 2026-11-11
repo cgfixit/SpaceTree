@@ -63,29 +63,31 @@ vol=$(printf '%s\n' "$out" | awk -F= '/^volume_total_bytes=/{print $2}')
 df_bytes=$(( $(df -k "$plain" | awk 'NR==2{print $2}') * 1024 ))
 check "volume_total = df -k" "$df_bytes" "$vol"
 
-# Boot volume figures. macOS's Available (free plus purgeable) has no command
-# line ground truth, so assert only what must hold and print the rest: the
-# figure is kept only when it is above free space and within capacity.
+# Boot volume figures. Used is capacity minus macOS's Available (free plus
+# purgeable), as System Settings shows it; on disk is what df shows. Available
+# is kept only when it is above free space and within capacity.
 vout=$("$bin" --volume /)
 printf '%s\n' "$vout" | sed 's/^/info  /'
 field() { printf '%s\n' "$vout" | awk -F= -v k="$1" '$1 == k { print $2; exit }'; }
 vtotal=$(field volume_total_bytes)
 vfree=$(field volume_free_bytes)
 vused=$(field volume_used_bytes)
+vdisk=$(field volume_on_disk_bytes)
 vavail=$(field volume_available_bytes)
 check "boot volume_total = df -k" "$(( $(df -k / | awk 'NR==2{print $2}') * 1024 ))" "$vtotal"
-if [ -n "$vused" ] && [ $((vused + vfree)) -le "$vtotal" ]; then
-  printf 'ok    %-34s %s + %s <= %s\n' "boot used + free within capacity" "$vused" "$vfree" "$vtotal"
+if [ -n "$vdisk" ] && [ $((vdisk + vfree)) -le "$vtotal" ]; then
+  printf 'ok    %-34s %s + %s <= %s\n' "boot on disk + free in capacity" "$vdisk" "$vfree" "$vtotal"
 else
-  printf 'FAIL  %-34s used=%s free=%s total=%s\n' "boot used + free within capacity" "$vused" "$vfree" "$vtotal"
+  printf 'FAIL  %-34s on_disk=%s free=%s total=%s\n' "boot on disk + free in capacity" "$vdisk" "$vfree" "$vtotal"
   fail=1
 fi
 if [ -z "$vavail" ]; then
   echo "note  macOS reports no purgeable space on / (nothing above free space)"
+  check "used = on disk" "$vdisk" "$vused"
 elif [ "$vavail" -gt "$vfree" ] && [ "$vavail" -le "$vtotal" ]; then
   printf 'ok    %-34s %s < %s <= %s\n' "boot available = free + purgeable" "$vfree" "$vavail" "$vtotal"
   check "purgeable = available - free" "$((vavail - vfree))" "$(field volume_purgeable_bytes)"
-  check "unavailable = total - available" "$((vtotal - vavail))" "$(field volume_unavailable_bytes)"
+  check "used = total - available" "$((vtotal - vavail))" "$vused"
 else
   printf 'FAIL  %-34s free=%s available=%s total=%s\n' "boot available = free + purgeable" "$vfree" "$vavail" "$vtotal"
   fail=1

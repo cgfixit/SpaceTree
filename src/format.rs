@@ -16,9 +16,9 @@ pub fn format_scan(result: &ScanResult) -> String {
     }
     push_available(
         &mut out,
-        result.volume_total,
         result.volume_free,
         result.volume_available,
+        result.volume_on_disk,
     );
     if result.error_count > 0 {
         out.push_str(&format!("scan_incomplete_errors={}\n", result.error_count));
@@ -27,9 +27,12 @@ pub fn format_scan(result: &ScanResult) -> String {
     out
 }
 
-/// macOS's Available figure and what follows from it: the purgeable part, and
-/// capacity minus Available, which is what System Settings shows as used.
-fn push_available(out: &mut String, total: u64, free: u64, available: Option<u64>) {
+/// The volume's on-disk bytes, then macOS's Available figure and the
+/// purgeable part of it.
+fn push_available(out: &mut String, free: u64, available: Option<u64>, on_disk: Option<u64>) {
+    if let Some(on_disk) = on_disk {
+        out.push_str(&format!("volume_on_disk_bytes={on_disk}\n"));
+    }
     let Some(available) = available else {
         return;
     };
@@ -37,10 +40,6 @@ fn push_available(out: &mut String, total: u64, free: u64, available: Option<u64
     out.push_str(&format!(
         "volume_purgeable_bytes={}\n",
         available.saturating_sub(free)
-    ));
-    out.push_str(&format!(
-        "volume_unavailable_bytes={}\n",
-        total.saturating_sub(available)
     ));
 }
 
@@ -52,10 +51,10 @@ pub fn format_volume(path: &Path) -> String {
     let mut out = String::new();
     out.push_str(&format!("volume_total_bytes={}\n", volume.total));
     out.push_str(&format!("volume_free_bytes={}\n", volume.free));
-    if let Some(used) = volume.root_used {
+    if let Some(used) = volume.shown_used() {
         out.push_str(&format!("volume_used_bytes={used}\n"));
     }
-    push_available(&mut out, volume.total, volume.free, volume.available);
+    push_available(&mut out, volume.free, volume.available, volume.root_used);
     for (mount, raw) in raw_available(path) {
         let raw = raw.map_or_else(|| "none".to_string(), |bytes| bytes.to_string());
         out.push_str(&format!(
