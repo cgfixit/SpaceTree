@@ -43,21 +43,32 @@ pub struct Node {
 /// APFS clone accounting shared by the scan workers.
 #[derive(Default)]
 struct CloneBook {
-    /// Clone ids already counted. A pure clone shares every extent with the
-    /// first file of its id, so it counts zero.
-    ids: Mutex<HashSet<u64>>,
+    /// Clone ids already counted, per device. A pure clone shares every
+    /// extent with the first file of its id, so it counts zero.
+    ids: Mutex<HashSet<(u64, u64)>>,
+    /// Files with more than one name already counted, by device and inode.
+    links: Mutex<HashSet<(u64, u64)>>,
     /// Physical ranges counted for files that share some extents. A clone
     /// rewritten in part gets a new id but keeps most of its blocks shared.
     extents: Mutex<ExtentLedger>,
 }
 
 impl CloneBook {
-    /// True when `id` is new to the scan.
-    fn first_of_id(&self, id: u64) -> bool {
+    /// True when `id` is new to the scan on device `dev`.
+    fn first_of_id(&self, dev: u64, id: u64) -> bool {
         self.ids
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id)
+            .insert((dev, id))
+    }
+
+    /// True the first time a hard-linked file is met; its other names then
+    /// count zero, as `du` counts them.
+    fn first_link(&self, dev: u64, ino: u64) -> bool {
+        self.links
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((dev, ino))
     }
 
     /// Allocated bytes of a file that shares extents, minus the bytes of its
@@ -111,6 +122,10 @@ pub struct ScanResult {
     /// How many of those were folders the system refused to open: macOS
     /// privacy protection (no Full Disk Access) or file permissions.
     pub blocked_count: u64,
+    /// How many of the blocked folders macOS privacy protection refused
+    /// (`EPERM`): the ones Full Disk Access opens. The rest are file
+    /// permissions, which need another user's rights.
+    pub privacy_count: u64,
     /// The first [`BLOCKED_SAMPLE`] such folders, sorted, to show which ones.
     pub blocked: Vec<PathBuf>,
 }
@@ -144,6 +159,18 @@ pub(crate) fn scan_with_volume(path: &Path, volume: VolumeSpace) -> io::Result<S
         HashSet::new()
     };
     let mut result = scan_inner(path, volume, &skip)?;
+    // A whole-disk walk takes minutes and the disk changes meanwhile. Compare
+    // the walk with the volume's figures as they are when it ends.
+    let after = volume_space(path);
+    let volume = if volume.root_used.is_some() && after.root_used.is_some() {
+        after
+    } else {
+        volume
+    };
+    result.volume_used = volume.shown_used();
+    result.volume_on_disk = volume.root_used;
+    result.volume_free = volume.free;
+    result.volume_available = volume.available;
     if let Some(used) = volume.shown_used() {
         add_hidden_space(&mut result, used);
     }
@@ -157,6 +184,7 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
     let clones = CloneBook::default();
     let errors = AtomicU64::new(0);
     let blocked_count = AtomicU64::new(0);
+    let privacy_count = AtomicU64::new(0);
     let blocked = Mutex::new(Vec::new());
     // The skip set holds real paths. A root reached through a symlink
     // (/Volumes/Macintosh HD for /) walks other names for the same folders.
@@ -174,9 +202,11 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
         clones: &clones,
         errors: &errors,
         blocked_count: &blocked_count,
+        privacy_count: &privacy_count,
         blocked: &blocked,
+        twin: None,
     };
-    let root = if lmeta.file_type().is_dir() {
+    let mut root = if lmeta.file_type().is_dir() {
         walk.dir(path, &lmeta)?.0
     } else if lmeta.file_type().is_symlink() {
         let followed = fs::metadata(path)?;
@@ -188,6 +218,21 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
     } else {
         leaf(path, &lmeta, volume_total, &clones).0
     };
+    // The boot volume is two volumes: `/` shows the Data volume only through
+    // firmlinks (/Users, /Applications, ...). What the Data volume holds
+    // outside them is used space too, reachable under its own mount point.
+    let boot_root = real_root.as_deref().unwrap_or(path) == Path::new("/");
+    if volume.root_used.is_some() && boot_root && root.is_dir {
+        let data = Walk {
+            scan_root: Path::new(DATA_VOLUME),
+            real_root: None,
+            twin: Some((Path::new(DATA_VOLUME), Path::new("/"))),
+            ..walk
+        };
+        if let Some(extra) = data.outside_twin() {
+            adopt(&mut root, extra, volume_total);
+        }
+    }
     Ok(ScanResult {
         root,
         volume_total,
@@ -198,12 +243,29 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
         hidden: 0,
         error_count: errors.into_inner(),
         blocked_count: blocked_count.into_inner(),
+        privacy_count: privacy_count.into_inner(),
         blocked: {
             let mut paths = blocked.into_inner().unwrap_or_else(|e| e.into_inner());
             paths.sort();
             paths
         },
     })
+}
+
+/// Mount point of the boot volume group's Data volume.
+const DATA_VOLUME: &str = "/System/Volumes/Data";
+
+/// Name of the row that holds what the Data volume keeps outside the
+/// firmlinks; its path is [`DATA_VOLUME`].
+pub const DATA_ONLY_NAME: &str = "System/Volumes/Data";
+
+/// Add `extra` as one more child of `root` and to its totals.
+fn adopt(root: &mut Node, extra: Node, volume_total: u64) {
+    root.size = root.size.saturating_add(extra.size);
+    root.logical = root.logical.saturating_add(extra.logical);
+    root.files = root.files.saturating_add(extra.files);
+    root.percent_of_disk = percent_of_disk(root.size, volume_total);
+    root.children.push(extra);
 }
 
 /// Name and path leaf of the synthetic row that carries [`ScanResult::hidden`].
@@ -642,7 +704,7 @@ fn leaf(
     let mut size = allocated_bytes(meta);
     if !meta.file_type().is_symlink() {
         if let Some(id) = apfs_clone_id(path) {
-            if !clones.first_of_id(id) {
+            if !clones.first_of_id(dev_id(meta), id) {
                 size = 0;
             }
         }
@@ -780,6 +842,8 @@ const ATTR_CMN_FILEID: u32 = 0x0200_0000;
 #[cfg(target_os = "macos")]
 const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
 #[cfg(target_os = "macos")]
+const ATTR_FILE_LINKCOUNT: u32 = 0x0000_0001;
+#[cfg(target_os = "macos")]
 const ATTR_FILE_ALLOCSIZE: u32 = 0x0000_0004;
 #[cfg(target_os = "macos")]
 const ATTR_FILE_DATALENGTH: u32 = 0x0000_0200;
@@ -816,6 +880,8 @@ struct BulkEnt {
     data_length: u64,
     alloc_size: u64,
     has_sizes: bool,
+    /// Names this file has (`st_nlink`); 0 when unknown.
+    nlink: u32,
     clone_id: Option<u64>,
     /// Bytes not shared with any other clone (`ATTR_CMNEXT_PRIVATESIZE`).
     private_size: Option<u64>,
@@ -877,7 +943,7 @@ fn list_bulk_fd(fd: libc::c_int, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>>
             | ATTR_CMN_FILEID,
         volattr: 0,
         dirattr: 0,
-        fileattr: ATTR_FILE_DATALENGTH | ATTR_FILE_ALLOCSIZE,
+        fileattr: ATTR_FILE_DATALENGTH | ATTR_FILE_ALLOCSIZE | ATTR_FILE_LINKCOUNT,
         forkattr: ATTR_CMNEXT_PRIVATESIZE | ATTR_CMNEXT_CLONEID,
     };
     let mut buf = vec![0u8; 256 * 1024];
@@ -1023,13 +1089,24 @@ fn parse_bulk_entry(buf: &[u8], start: usize) -> Option<(usize, BulkEnt)> {
     let mut data_length = 0u64;
     let mut alloc_size = 0u64;
     let mut has_sizes = false;
-    // File attributes arrive in ascending bit order. ALLOCSIZE is the lower bit.
+    // File attributes arrive in ascending bit order: LINKCOUNT (u32), then
+    // ALLOCSIZE and DATALENGTH (off_t, signed).
+    let mut nlink = 0u32;
+    if file & ATTR_FILE_LINKCOUNT != 0 {
+        o = align4(o);
+        if o + 4 > rec.len() {
+            return None;
+        }
+        nlink = u32::from_ne_bytes(rec[o..o + 4].try_into().ok()?);
+        o += 4;
+    }
     if file & ATTR_FILE_ALLOCSIZE != 0 {
         o = align4(o);
         if o + 8 > rec.len() {
             return None;
         }
-        alloc_size = u64::from_ne_bytes(rec[o..o + 8].try_into().ok()?);
+        let bytes = i64::from_ne_bytes(rec[o..o + 8].try_into().ok()?);
+        alloc_size = u64::try_from(bytes).unwrap_or(0);
         o += 8;
         has_sizes = true;
     }
@@ -1038,7 +1115,8 @@ fn parse_bulk_entry(buf: &[u8], start: usize) -> Option<(usize, BulkEnt)> {
         if o + 8 > rec.len() {
             return None;
         }
-        data_length = u64::from_ne_bytes(rec[o..o + 8].try_into().ok()?);
+        let bytes = i64::from_ne_bytes(rec[o..o + 8].try_into().ok()?);
+        data_length = u64::try_from(bytes).unwrap_or(0);
         o += 8;
         has_sizes = true;
     }
@@ -1076,6 +1154,7 @@ fn parse_bulk_entry(buf: &[u8], start: usize) -> Option<(usize, BulkEnt)> {
             data_length,
             alloc_size,
             has_sizes,
+            nlink,
             clone_id,
             private_size,
         },
@@ -1151,6 +1230,7 @@ fn list_bulk(path: &Path, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>> {
             data_length: meta.len(),
             alloc_size,
             has_sizes: true,
+            nlink: u32::try_from(meta.nlink()).unwrap_or(u32::MAX),
             clone_id: None,
             private_size: None,
         });
@@ -1254,7 +1334,9 @@ fn leaf_from_bulk(
         (0, 0, None)
     };
     if !symlink {
-        if clone_id.is_some_and(|id| !clones.first_of_id(id)) {
+        if ent.nlink > 1 && !clones.first_link(ent.dev, ent.ino) {
+            size = 0;
+        } else if clone_id.is_some_and(|id| !clones.first_of_id(ent.dev, id)) {
             size = 0;
         } else if ent.private_size.is_some_and(|private| private < size) {
             size = clones.unshared(&path, ent.dev, size);
@@ -1294,7 +1376,11 @@ struct Walk<'a> {
     /// The scan root's real path, when it differs from `scan_root`.
     real_root: Option<&'a Path>,
     blocked_count: &'a AtomicU64,
+    privacy_count: &'a AtomicU64,
     blocked: &'a Mutex<Vec<PathBuf>>,
+    /// Set for the walk of the Data volume's own root: a folder that is the
+    /// same folder under the second path was already walked from there.
+    twin: Option<(&'a Path, &'a Path)>,
 }
 
 impl Walk<'_> {
@@ -1307,6 +1393,45 @@ impl Walk<'_> {
         }
     }
 
+    /// True when `child`, met in the walk of the first `twin` path, is the
+    /// same folder as its counterpart under the second.
+    fn twin_covers(&self, child: &Path) -> bool {
+        let Some((own_root, twin_root)) = self.twin else {
+            return false;
+        };
+        let Ok(rel) = child.strip_prefix(own_root) else {
+            return false;
+        };
+        match (fs::metadata(child), fs::metadata(twin_root.join(rel))) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+
+    /// Walk the first `twin` path and keep what the walk of the second did
+    /// not already reach: the folders that are not the same folder there.
+    /// `None` when it cannot be listed or holds nothing more.
+    fn outside_twin(&self) -> Option<Node> {
+        let (own_root, _) = self.twin?;
+        let meta = fs::metadata(own_root).ok()?;
+        let (mut node, _) = self.dir(own_root, &meta).ok()?;
+        node.children.retain(|c| c.size > 0 || c.files > 0);
+        if node.children.is_empty() {
+            return None;
+        }
+        let sum = |f: fn(&Node) -> u64| {
+            node.children
+                .iter()
+                .fold(0u64, |acc, c| acc.saturating_add(f(c)))
+        };
+        node.size = sum(|c| c.size);
+        node.logical = sum(|c| c.logical);
+        node.files = sum(|c| c.files);
+        node.percent_of_disk = percent_of_disk(node.size, self.volume_total);
+        node.name = DATA_ONLY_NAME.to_string();
+        Some(node)
+    }
+
     /// Count a folder that could not be listed, and keep its path when the
     /// system refused access.
     fn unreadable(&self, path: &Path, err: &io::Error) {
@@ -1315,6 +1440,11 @@ impl Walk<'_> {
             return;
         }
         self.blocked_count.fetch_add(1, Ordering::Relaxed);
+        // macOS answers EPERM for a privacy refusal and EACCES for
+        // permission bits or an ACL.
+        if cfg!(target_os = "macos") && err.raw_os_error() == Some(libc::EPERM) {
+            self.privacy_count.fetch_add(1, Ordering::Relaxed);
+        }
         let mut blocked = self.blocked.lock().unwrap_or_else(|e| e.into_inner());
         if blocked.len() < BLOCKED_SAMPLE {
             blocked.push(path.to_path_buf());
@@ -1362,6 +1492,7 @@ impl Walk<'_> {
                 // A mount may be listed by the path walked or by its real path.
                 if self.skip.contains(&child)
                     || self.skip.contains(real_child.as_ref())
+                    || self.twin_covers(&child)
                     || !insert_seen(self.seen, ent.dev, ent.ino)
                 {
                     continue;
@@ -1660,6 +1791,83 @@ mod whole_volume_tests {
         fs::remove_dir_all(&dir).unwrap();
         let keep = result.root.children.iter().find(|c| c.name == "keep.bin");
         assert_eq!(Some(result.root.size), keep.map(|c| c.size));
+    }
+
+    #[test]
+    fn a_second_root_adds_only_folders_the_first_walk_did_not_reach() {
+        // data/ stands for the Data volume, twin/ for `/`: `shared` and
+        // `part/linked` are the same folders under both (a firmlink), `own`
+        // and `part/apart` exist only under data/.
+        let dir = temp_tree().with_extension("twin");
+        let _ = fs::remove_dir_all(&dir);
+        let (data, twin) = (dir.join("data"), dir.join("twin"));
+        for sub in ["shared", "own", "part/linked", "part/apart", "empty"] {
+            fs::create_dir_all(data.join(sub)).unwrap();
+        }
+        fs::create_dir_all(twin.join("part")).unwrap();
+        fs::write(data.join("shared/s.bin"), vec![1u8; 8192]).unwrap();
+        fs::write(data.join("own/o.bin"), vec![1u8; 4096]).unwrap();
+        fs::write(data.join("part/linked/l.bin"), vec![1u8; 8192]).unwrap();
+        fs::write(data.join("part/apart/a.bin"), vec![1u8; 4096]).unwrap();
+        std::os::unix::fs::symlink(data.join("shared"), twin.join("shared")).unwrap();
+        std::os::unix::fs::symlink(data.join("part/linked"), twin.join("part/linked")).unwrap();
+
+        let (seen, clones) = (Mutex::new(HashSet::new()), CloneBook::default());
+        let (errors, blocked_count, privacy_count) =
+            (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
+        let (blocked, skip) = (Mutex::new(Vec::new()), HashSet::new());
+        let walk = Walk {
+            volume_total: 1 << 30,
+            scan_root: &data,
+            real_root: None,
+            skip: &skip,
+            seen: &seen,
+            clones: &clones,
+            errors: &errors,
+            blocked_count: &blocked_count,
+            privacy_count: &privacy_count,
+            blocked: &blocked,
+            twin: Some((&data, &twin)),
+        };
+        let extra = walk.outside_twin().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(extra.name, DATA_ONLY_NAME);
+        let names: Vec<&str> = extra.children.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.contains(&"own") && names.contains(&"part"),
+            "{names:?}"
+        );
+        assert!(
+            !names.contains(&"shared"),
+            "the same folder is not walked twice"
+        );
+        assert!(
+            !names.contains(&"empty"),
+            "nothing to show for an empty folder"
+        );
+        assert_eq!(extra.files, 2, "o.bin and a.bin only");
+        let part = extra.children.iter().find(|c| c.name == "part").unwrap();
+        assert_eq!(part.children.len(), 1);
+        assert_eq!(part.children[0].name, "apart");
+
+        let mut root = extra.clone();
+        let before = root.size;
+        adopt(&mut root, extra, 1 << 30);
+        assert_eq!(root.size, before * 2);
+    }
+
+    #[test]
+    fn a_file_with_two_names_counts_once() {
+        let dir = temp_tree().with_extension("links");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("first.bin"), vec![3u8; 65536]).unwrap();
+        fs::hard_link(dir.join("first.bin"), dir.join("second.bin")).unwrap();
+        let one = fs::metadata(dir.join("first.bin")).unwrap().blocks() * 512;
+        let result = scan_inner(&dir, VolumeSpace::default(), &HashSet::new()).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(result.root.size, one);
+        assert_eq!(result.root.files, 2);
     }
 
     #[test]

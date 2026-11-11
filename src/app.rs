@@ -1406,21 +1406,34 @@ fn incomplete_warning(result: &ScanResult) -> String {
         result.error_count,
         plural(result.error_count, "error", "errors")
     );
+    let privacy = result.privacy_count.min(result.blocked_count);
+    let permissions = result.blocked_count - privacy;
     if result.blocked_count > 0 {
         line.push_str(&format!(
-            " The system refused to open {} {} (hover for which).",
+            " The system refused to open {} {} (hover for which)",
             result.blocked_count,
             plural(result.blocked_count, "folder", "folders")
         ));
+        line.push_str(&match (privacy, permissions) {
+            (0, _) => ": file permissions, which Full Disk Access does not change.".to_string(),
+            (_, 0) => ": macOS privacy protection.".to_string(),
+            _ => format!(
+                ": {privacy} by macOS privacy protection, {permissions} by file permissions."
+            ),
+        });
     }
-    line.push(' ');
-    line.push_str(if result.hidden > 0 {
-        "What could not be read is counted in Hidden space, not in its folder. Full Disk Access (System Settings › Privacy & Security) lets a new scan read more."
+    if result.hidden > 0 {
+        line.push_str(" What could not be read is counted in Hidden space, not in its folder.");
     } else if result.blocked_count > 0 {
-        "Their contents are not counted."
+        line.push_str(" Their contents are not counted.");
     } else {
-        "Sizes are partial."
-    });
+        line.push_str(" Sizes are partial.");
+    }
+    if privacy > 0 || (result.hidden > 0 && result.blocked_count == 0) {
+        line.push_str(
+            " Full Disk Access (System Settings › Privacy & Security) lets a new scan read more.",
+        );
+    }
     line
 }
 

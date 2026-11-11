@@ -23,7 +23,8 @@ Scanning `/` or another local macOS volume root adds what a folder scan does not
 - **Green figures.** The root row's Percentage cell is green and shows `~N% full`, and a green `Whole volume: ~N% free` line appears as soon as the scan starts. Folder scans show neither.
 - **They match System Settings › Storage.** macOS counts purgeable space (local snapshots, caches, files iCloud also holds) as available although it is still on disk. SpaceTree asks macOS for that Available figure, so used is capacity minus available, and the green line says how much of it is purgeable. The cell's tooltip gives the on-disk figure `df` prints. A volume macOS reports no purgeable space for uses the `df` figures.
 - **Hidden space.** One extra row holds used space the scan found in no file it could read: folders macOS did not let SpaceTree read, local snapshots, and system data outside the scanned folders. With it, the root row equals the used figure above. Purgeable files the scan did read still count at full size in their folders, so the row can understate what is hidden.
-- **Blocked folders.** A scan that could not read everything keeps a warning in the status bar with the number of read errors and how many were folders the system refused to open; hover it for their paths. To read more, turn on Full Disk Access for SpaceTree in System Settings › Privacy & Security and scan again.
+- **Blocked folders.** A scan that could not read everything keeps a warning in the status bar: how many folders the system refused to open, and how many of those by macOS privacy protection versus file permissions. Hover it for their paths. Full Disk Access for SpaceTree (System Settings › Privacy & Security) opens the privacy ones; folders of other users or the system stay closed.
+- **The Data volume.** `/` shows the Data volume only through its firmlinks (`/Users`, `/Applications`, …). A scan of `/` also walks what the Data volume keeps outside them and lists it as `System/Volumes/Data`, so readable files there are no longer part of Hidden space.
 - **One volume only.** The scan does not enter other mounts (`/Volumes/*`, mounted disk images), also when the root is reached through a symlink.
 
 ## How sizes are measured
@@ -31,7 +32,7 @@ Scanning `/` or another local macOS volume root adds what a folder scan does not
 - **Physical Size** is allocated bytes (`st_blocks * 512`); **Logical Size** is `st_size`. A folder is the sum of its children. Units are decimal, as in Finder (1 GB = 1,000,000,000 bytes).
 - **One system call per batch.** On macOS the scan lists each directory with `getattrlistbulk`, which returns names, sizes, dates, and APFS clone ids together, and walks subdirectories in parallel. On Linux, where the crate also builds and tests, it uses ordinary file metadata, without clone ids.
 - **APFS clones count once.** A pure clone (`cp -c`, Finder Duplicate) counts as zero after the first file seen. A clone later edited in part counts only the blocks it no longer shares, read from its physical extents. `du` counts every clone in full.
-- **No double counting.** On APFS a hard-linked file counts once. Child symlinks are not followed, and `/System/Volumes` is skipped unless it is the scan root, so the Data volume is not counted twice.
+- **No double counting.** A file with several hard links counts once. Child symlinks are not followed, and `/System/Volumes` is skipped unless it is the scan root, so the Data volume is not counted twice.
 - **Errors do not stop a scan.** An unreadable entry is counted and the rest is reported. Only an unreadable root fails.
 
 ## Ollama models
@@ -44,7 +45,7 @@ Ollama stores each model layer once as `~/.ollama/models/blobs/sha256-<hash>`, s
 ## Command line
 
 ```bash
-cargo run -- --scan /path/to/folder   # text report of a scan
+cargo run -- --scan /path/to/folder   # text report of a scan (--depth N limits the rows)
 cargo run -- --volume /               # volume figures only, no scan
 cargo run -- --ollama                 # $OLLAMA_MODELS, or ~/.ollama/models
 cargo run -- --gui-scan /path         # open the app and scan

@@ -4,7 +4,13 @@ fn main() {
         let path = args.get(i + 1).cloned().unwrap_or_else(|| ".".into());
         match spacetree::scan(std::path::Path::new(&path)) {
             Ok(result) => {
-                print!("{}", spacetree::format_scan(&result));
+                let depth = args
+                    .iter()
+                    .position(|a| a == "--depth")
+                    .and_then(|d| args.get(d + 1))
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(usize::MAX);
+                print!("{}", spacetree::format_scan_to_depth(&result, depth));
                 if result.error_count > 0 {
                     eprintln!(
                         "scan incomplete: {} read {}; {}",
@@ -30,6 +36,12 @@ fn main() {
                         }
                         if result.blocked_count > result.blocked.len() as u64 {
                             eprintln!("  ...");
+                        }
+                        if result.privacy_count > 0 {
+                            eprintln!(
+                                "{} of them by macOS privacy protection: Full Disk Access opens those",
+                                result.privacy_count
+                            );
                         }
                     }
                     std::process::exit(1);
@@ -67,6 +79,7 @@ fn main() {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!("SpaceTree — macOS disk usage analyzer");
         eprintln!("  spacetree --scan <path>       print expandable tree");
+        eprintln!("      --depth <n>               print rows no deeper than n below the root");
         eprintln!("  spacetree --volume [path]     print the volume's size figures, no scan");
         eprintln!("  spacetree --ollama [dir]      list Ollama models with their blobs, read-only");
         eprintln!("  spacetree --gui-scan <path>   open the GUI and scan");

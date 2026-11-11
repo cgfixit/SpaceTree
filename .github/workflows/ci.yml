@@ -53,6 +53,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/verify-macos-sizes.sh target/debug/spacetree
 
+      - name: Scan the boot volume and check its totals
+        if: runner.os == 'macOS'
+        timeout-minutes: 25
+        run: ./scripts/verify-macos-root.sh target/debug/spacetree
+
       - name: Reveal fixture paths in Finder and verify selection
         if: runner.os == 'macOS'
         timeout-minutes: 2
