@@ -1359,7 +1359,9 @@ impl Walk<'_> {
                 continue;
             }
             if ent.objtype == VDIR {
-                if self.skip.contains(real_child.as_ref())
+                // A mount may be listed by the path walked or by its real path.
+                if self.skip.contains(&child)
+                    || self.skip.contains(real_child.as_ref())
                     || !insert_seen(self.seen, ent.dev, ent.ino)
                 {
                     continue;
