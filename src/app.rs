@@ -1,6 +1,7 @@
 //! Native window: path, background scan, size columns, and treemap.
 
-use std::collections::{BTreeMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -68,6 +69,9 @@ struct SpaceTreeApp {
     legend: Vec<LegendRow>,
     /// Which Ollama model each blob file in the scan belongs to.
     ollama: BTreeMap<PathBuf, BlobNote>,
+    /// Symlink targets of rows the table has drawn, read once per scan
+    /// instead of once per frame.
+    links: RefCell<HashMap<PathBuf, Option<PathBuf>>>,
     generation: u64,
     map_cache: Option<MapCache>,
     zoom: Option<PathBuf>,
@@ -94,6 +98,7 @@ impl SpaceTreeApp {
             split_top: 0.42,
             legend: Vec::new(),
             ollama: BTreeMap::new(),
+            links: RefCell::new(HashMap::new()),
             generation: 0,
             map_cache: None,
             zoom: None,
@@ -119,6 +124,7 @@ impl SpaceTreeApp {
         self.expanded.clear();
         self.legend.clear();
         self.ollama.clear();
+        self.links.borrow_mut().clear();
         self.map_cache = None;
         self.zoom = None;
         let (tx, rx) = mpsc::channel();
@@ -388,23 +394,13 @@ impl eframe::App for SpaceTreeApp {
             });
             if let Some(result) = &self.result {
                 if result.error_count > 0 {
-                    ui.colored_label(
+                    let warning = ui.colored_label(
                         ui.visuals().warn_fg_color,
-                        format!(
-                            "Scan incomplete: {} read {}. {}",
-                            result.error_count,
-                            if result.error_count == 1 {
-                                "error"
-                            } else {
-                                "errors"
-                            },
-                            if result.hidden > 0 {
-                                "What could not be read is counted in Hidden space, not in its folder. Full Disk Access (System Settings › Privacy & Security) lets a new scan read more."
-                            } else {
-                                "Sizes are partial."
-                            }
-                        ),
+                        incomplete_warning(result),
                     );
+                    if !result.blocked.is_empty() {
+                        warning.on_hover_text(blocked_help(result));
+                    }
                 }
             }
             if let Some(note) = &self.last_note {
@@ -537,6 +533,7 @@ impl SpaceTreeApp {
                 return;
             };
             let ollama = &self.ollama;
+            let links = &self.links;
             let mut visible = Vec::new();
             flatten(&result.root, 0, &self.expanded, &mut visible);
             let selected = self.selected.clone();
@@ -602,6 +599,12 @@ impl SpaceTreeApp {
                                 let is_sel = selected.as_ref() == Some(&node.path);
                                 row.set_selected(is_sel);
                                 let mut path_menu = |ui: &mut egui::Ui| {
+                                    if node.color_ext == HIDDEN_KEY {
+                                        ui.label(format!(
+                                            "{HIDDEN_NAME} is not a file: nothing to reveal or copy"
+                                        ));
+                                        return;
+                                    }
                                     if ui.button("Reveal in Finder").clicked() {
                                         ctx_reveal = Some(node.path.clone());
                                         ui.close_menu();
@@ -632,7 +635,12 @@ impl SpaceTreeApp {
                                         r.context_menu(&mut path_menu);
                                     } else {
                                         ui.add_space(16.0);
-                                        match fs::read_link(&node.path) {
+                                        let link = links
+                                            .borrow_mut()
+                                            .entry(node.path.clone())
+                                            .or_insert_with(|| fs::read_link(&node.path).ok())
+                                            .clone();
+                                        match link.ok_or(()) {
                                             Ok(target) => {
                                                 ui.colored_label(
                                                     weak,
@@ -1382,6 +1390,55 @@ fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Status-bar warning for a scan that could not read everything.
+fn incomplete_warning(result: &ScanResult) -> String {
+    let plural = |n: u64, one: &str, many: &str| {
+        if n == 1 {
+            one.to_string()
+        } else {
+            many.to_string()
+        }
+    };
+    let mut line = format!(
+        "Scan incomplete: {} read {}.",
+        result.error_count,
+        plural(result.error_count, "error", "errors")
+    );
+    if result.blocked_count > 0 {
+        line.push_str(&format!(
+            " The system refused to open {} {} (hover for which).",
+            result.blocked_count,
+            plural(result.blocked_count, "folder", "folders")
+        ));
+    }
+    line.push(' ');
+    line.push_str(if result.hidden > 0 {
+        "What could not be read is counted in Hidden space, not in its folder. Full Disk Access (System Settings › Privacy & Security) lets a new scan read more."
+    } else if result.blocked_count > 0 {
+        "Their contents are not counted."
+    } else {
+        "Sizes are partial."
+    });
+    line
+}
+
+/// Tooltip of that warning: the folders the system refused to open.
+fn blocked_help(result: &ScanResult) -> String {
+    let mut lines = vec!["Folders the system refused to open:".to_string()];
+    lines.extend(
+        result
+            .blocked
+            .iter()
+            .take(24)
+            .map(|p| p.display().to_string()),
+    );
+    let shown = result.blocked.len().min(24) as u64;
+    if result.blocked_count > shown {
+        lines.push(format!("and {} more", result.blocked_count - shown));
+    }
+    lines.join("\n")
 }
 
 /// The line shown as soon as a whole-volume scan starts: what macOS counts

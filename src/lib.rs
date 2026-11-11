@@ -22,5 +22,5 @@ pub use ollama::{
     blob_notes, default_models_dir, format_ollama, BlobNote, BlobUse, OllamaLayer, OllamaModel,
     OllamaStore,
 };
-pub use scan::{scan, Node, ScanResult, HIDDEN_NAME};
+pub use scan::{scan, Node, ScanResult, BLOCKED_SAMPLE, HIDDEN_NAME};
 pub use sort::{sort_children, sort_tree, SortColumn};

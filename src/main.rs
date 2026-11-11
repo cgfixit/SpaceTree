@@ -20,6 +20,18 @@ fn main() {
                             "sizes are partial"
                         }
                     );
+                    if result.blocked_count > 0 {
+                        eprintln!(
+                            "folders the system refused to open: {}",
+                            result.blocked_count
+                        );
+                        for path in &result.blocked {
+                            eprintln!("  {}", path.display());
+                        }
+                        if result.blocked_count > result.blocked.len() as u64 {
+                            eprintln!("  ...");
+                        }
+                    }
                     std::process::exit(1);
                 }
             }

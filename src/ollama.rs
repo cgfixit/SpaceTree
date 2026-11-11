@@ -134,11 +134,11 @@ fn blob_note(store: &OllamaStore, blob: &str) -> BlobNote {
             format!("Ollama blob shared by {} models:", uses.len())
         }];
         detail.extend(uses.iter().map(|u| format!("  {} ({})", u.model, u.kind)));
-        detail.push(if uses.len() == 1 {
-            format!("`ollama rm {}` removes it", first.model)
-        } else {
-            "It stays until every one of them is removed".to_string()
-        });
+        if uses.len() > 1 {
+            detail.push("It stays until every one of them is removed".to_string());
+        } else if let Some(command) = remove_command(&first.model) {
+            detail.push(format!("`{command}` removes it"));
+        }
         BlobNote { label, detail }
     } else if is_partial(blob) {
         BlobNote {
@@ -165,8 +165,33 @@ fn blob_note(store: &OllamaStore, blob: &str) -> BlobNote {
 /// keyed by the file's path in the tree.
 pub fn blob_notes(root: &Node) -> BTreeMap<PathBuf, BlobNote> {
     let mut out = BTreeMap::new();
+    // A scan of the blobs folder itself has its manifests beside the root.
+    if root.is_dir && root.name == "blobs" {
+        if let Some(store) = root.path.parent().and_then(OllamaStore::load) {
+            note_blobs(&store, root, &mut out);
+        }
+    }
     collect_notes(root, &mut out);
     out
+}
+
+fn note_blobs(store: &OllamaStore, blobs: &Node, out: &mut BTreeMap<PathBuf, BlobNote>) {
+    for blob in blobs.children.iter().filter(|c| !c.is_dir) {
+        if blob.name.starts_with("sha256-") {
+            out.insert(blob.path.clone(), blob_note(store, &blob.name));
+        }
+    }
+}
+
+/// `ollama rm <model>`, or `None` for a name that is not safe to paste into
+/// a shell. Names come from directory names, which can hold anything.
+fn remove_command(model: &str) -> Option<String> {
+    let plain = !model.is_empty()
+        && !model.starts_with('-')
+        && model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._/:-".contains(&b));
+    plain.then(|| format!("ollama rm {model}"))
 }
 
 fn collect_notes(node: &Node, out: &mut BTreeMap<PathBuf, BlobNote>) {
@@ -176,11 +201,7 @@ fn collect_notes(node: &Node, out: &mut BTreeMap<PathBuf, BlobNote>) {
     let child = |name: &str| node.children.iter().find(|c| c.is_dir && c.name == name);
     if let (Some(blobs), Some(_)) = (child("blobs"), child("manifests")) {
         if let Some(store) = OllamaStore::load(&node.path) {
-            for blob in blobs.children.iter().filter(|c| !c.is_dir) {
-                if blob.name.starts_with("sha256-") {
-                    out.insert(blob.path.clone(), blob_note(&store, &blob.name));
-                }
-            }
+            note_blobs(&store, blobs, out);
         }
     }
     for child in &node.children {
@@ -237,11 +258,10 @@ pub fn format_ollama(dir: &Path) -> Result<String, String> {
             .sum();
         removable.push((own, model.name.as_str()));
         out.push_str(&format!(
-            "{}  {}  ({} freed by `ollama rm {}`)\n",
+            "{}  {}  ({} freed by removing it alone)\n",
             model.name,
             format_bytes(total),
-            format_bytes(own),
-            model.name
+            format_bytes(own)
         ));
         let mut seen = BTreeSet::new();
         for layer in &model.layers {
@@ -323,7 +343,9 @@ pub fn format_ollama(dir: &Path) -> Result<String, String> {
     if !removable.is_empty() {
         out.push_str("\nLargest first, by what removing each one alone frees:\n");
         for (own, name) in removable {
-            out.push_str(&format!("  {:>9}  ollama rm {name}\n", format_bytes(own)));
+            let command = remove_command(name)
+                .unwrap_or_else(|| format!("{name:?} (unusual name: remove it by hand)"));
+            out.push_str(&format!("  {:>9}  {command}\n", format_bytes(own)));
         }
     }
     Ok(out)
@@ -652,5 +674,12 @@ mod tests {
         assert!(report.contains("MISSING"), "{report}");
         assert!(report.contains("Blobs no model uses: 1 files"), "{report}");
         assert!(format_ollama(Path::new("/nonexistent-spacetree")).is_err());
+        assert_eq!(
+            remove_command("hf.co/org/repo:Q4_K_M").as_deref(),
+            Some("ollama rm hf.co/org/repo:Q4_K_M")
+        );
+        for hostile in ["x; rm -rf ~", "$(id):1", "-rf", "a b", ""] {
+            assert_eq!(remove_command(hostile), None, "{hostile}");
+        }
     }
 }

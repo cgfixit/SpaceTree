@@ -108,7 +108,15 @@ pub struct ScanResult {
     pub hidden: u64,
     /// Failed directory reads or entry metadata reads. Zero means none were observed.
     pub error_count: u64,
+    /// How many of those were folders the system refused to open: macOS
+    /// privacy protection (no Full Disk Access) or file permissions.
+    pub blocked_count: u64,
+    /// The first [`BLOCKED_SAMPLE`] such folders, sorted, to show which ones.
+    pub blocked: Vec<PathBuf>,
 }
+
+/// How many refused folders a scan keeps by path.
+pub const BLOCKED_SAMPLE: usize = 64;
 
 impl ScanResult {
     /// Bytes macOS counts as both in use on disk and available.
@@ -148,13 +156,25 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
     let seen = Mutex::new(HashSet::new());
     let clones = CloneBook::default();
     let errors = AtomicU64::new(0);
+    let blocked_count = AtomicU64::new(0);
+    let blocked = Mutex::new(Vec::new());
+    // The skip set holds real paths. A root reached through a symlink
+    // (/Volumes/Macintosh HD for /) walks other names for the same folders.
+    let real_root = if skip.is_empty() {
+        None
+    } else {
+        fs::canonicalize(path).ok().filter(|real| real != path)
+    };
     let walk = Walk {
         volume_total,
         scan_root: path,
+        real_root: real_root.as_deref(),
         skip,
         seen: &seen,
         clones: &clones,
         errors: &errors,
+        blocked_count: &blocked_count,
+        blocked: &blocked,
     };
     let root = if lmeta.file_type().is_dir() {
         walk.dir(path, &lmeta)?.0
@@ -177,6 +197,12 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
         volume_available: volume.available,
         hidden: 0,
         error_count: errors.into_inner(),
+        blocked_count: blocked_count.into_inner(),
+        blocked: {
+            let mut paths = blocked.into_inner().unwrap_or_else(|e| e.into_inner());
+            paths.sort();
+            paths
+        },
     })
 }
 
@@ -894,11 +920,18 @@ fn list_bulk_fd(fd: libc::c_int, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>>
         got_batch = true;
         let mut off = 0usize;
         for _ in 0..n {
-            let Some((next, ent)) = parse_bulk_entry(&buf, off) else {
+            // A record whose length is unusable ends the batch; one that is
+            // well framed but does not parse costs only itself.
+            let Some(end) = bulk_record_end(&buf, off) else {
                 errors.fetch_add(1, Ordering::Relaxed);
                 break;
             };
-            off = next;
+            let parsed = parse_bulk_entry(&buf, off);
+            off = end;
+            let Some((_, ent)) = parsed else {
+                errors.fetch_add(1, Ordering::Relaxed);
+                continue;
+            };
             if ent.name == "." || ent.name == ".." {
                 continue;
             }
@@ -911,6 +944,15 @@ fn list_bulk_fd(fd: libc::c_int, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>>
 #[cfg(target_os = "macos")]
 fn align4(off: usize) -> usize {
     off.div_ceil(4) * 4
+}
+
+/// Offset just past the record that starts at `start`, from its length field.
+#[cfg(target_os = "macos")]
+fn bulk_record_end(buf: &[u8], start: usize) -> Option<usize> {
+    let head = buf.get(start..start.checked_add(4)?)?;
+    let rec_len = u32::from_ne_bytes(head.try_into().ok()?) as usize;
+    let end = start.checked_add(rec_len)?;
+    (rec_len >= 4 && end <= buf.len()).then_some(end)
 }
 
 #[cfg(target_os = "macos")]
@@ -1249,9 +1291,36 @@ struct Walk<'a> {
     seen: &'a Mutex<HashSet<(u64, u64)>>,
     clones: &'a CloneBook,
     errors: &'a AtomicU64,
+    /// The scan root's real path, when it differs from `scan_root`.
+    real_root: Option<&'a Path>,
+    blocked_count: &'a AtomicU64,
+    blocked: &'a Mutex<Vec<PathBuf>>,
 }
 
 impl Walk<'_> {
+    /// `child` under the scan root's real path, which is what mount points
+    /// and `/System/Volumes` are compared with.
+    fn real_path<'p>(&self, child: &'p Path) -> std::borrow::Cow<'p, Path> {
+        match (self.real_root, child.strip_prefix(self.scan_root)) {
+            (Some(real), Ok(rel)) => real.join(rel).into(),
+            _ => child.into(),
+        }
+    }
+
+    /// Count a folder that could not be listed, and keep its path when the
+    /// system refused access.
+    fn unreadable(&self, path: &Path, err: &io::Error) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+        if err.kind() != io::ErrorKind::PermissionDenied {
+            return;
+        }
+        self.blocked_count.fetch_add(1, Ordering::Relaxed);
+        let mut blocked = self.blocked.lock().unwrap_or_else(|e| e.into_inner());
+        if blocked.len() < BLOCKED_SAMPLE {
+            blocked.push(path.to_path_buf());
+        }
+    }
+
     fn dir(&self, path: &Path, meta: &Metadata) -> io::Result<(Node, BTreeMap<String, ExtSum>)> {
         self.dir_known(
             path,
@@ -1277,18 +1346,22 @@ impl Walk<'_> {
         let entries = match list_bulk(path, self.errors) {
             Ok(entries) => entries,
             Err(err) if path == self.scan_root => return Err(err),
-            Err(_) => {
-                self.errors.fetch_add(1, Ordering::Relaxed);
+            Err(err) => {
+                self.unreadable(path, &err);
                 Vec::new()
             }
         };
+        let real_scan_root = self.real_root.unwrap_or(self.scan_root);
         for ent in entries {
             let child = path.join(&ent.name);
-            if is_hidden_data_mount(self.scan_root, &child) {
+            let real_child = self.real_path(&child);
+            if is_hidden_data_mount(real_scan_root, &real_child) {
                 continue;
             }
             if ent.objtype == VDIR {
-                if self.skip.contains(&child) || !insert_seen(self.seen, ent.dev, ent.ino) {
+                if self.skip.contains(real_child.as_ref())
+                    || !insert_seen(self.seen, ent.dev, ent.ino)
+                {
                     continue;
                 }
                 subdirs.push(Subdir {
@@ -1317,7 +1390,9 @@ impl Walk<'_> {
             merge_ext(&mut by_ext, totals);
             children.push(node);
         }
-        let size: u64 = children.iter().map(|c| c.size).sum();
+        let size = children
+            .iter()
+            .fold(0u64, |acc, c| acc.saturating_add(c.size));
         let logical = children
             .iter()
             .fold(0u64, |acc, c| acc.saturating_add(c.logical));
@@ -1568,6 +1643,21 @@ mod whole_volume_tests {
             ..volume
         };
         assert_eq!(unknown.shown_used(), Some(1 << 20), "falls back to on disk");
+    }
+
+    #[test]
+    fn a_root_reached_through_a_symlink_still_skips_other_mounts() {
+        let dir = temp_tree();
+        let alias = dir.with_extension("alias");
+        let _ = fs::remove_file(&alias);
+        std::os::unix::fs::symlink(&dir, &alias).unwrap();
+        let real = fs::canonicalize(&dir).unwrap();
+        let skip: HashSet<PathBuf> = [real.join("mnt/ext")].into_iter().collect();
+        let result = scan_inner(&alias, VolumeSpace::default(), &skip).unwrap();
+        fs::remove_file(&alias).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        let keep = result.root.children.iter().find(|c| c.name == "keep.bin");
+        assert_eq!(Some(result.root.size), keep.map(|c| c.size));
     }
 
     #[test]
