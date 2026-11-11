@@ -1,5 +1,7 @@
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::scan::{raw_available, volume_space};
 use crate::{Node, ScanResult, HIDDEN_KEY};
 
 /// Stable text dump of a scan for the `--scan` CLI and tests.
@@ -7,14 +9,60 @@ pub fn format_scan(result: &ScanResult) -> String {
     let mut out = String::new();
     out.push_str(&format!("volume_total_bytes={}\n", result.volume_total));
     out.push_str(&format!("root_size_bytes={}\n", result.root.size));
+    out.push_str(&format!("volume_free_bytes={}\n", result.volume_free));
     if let Some(used) = result.volume_used {
         out.push_str(&format!("volume_used_bytes={used}\n"));
         out.push_str(&format!("hidden_bytes={}\n", result.hidden));
     }
+    push_available(
+        &mut out,
+        result.volume_total,
+        result.volume_free,
+        result.volume_available,
+    );
     if result.error_count > 0 {
         out.push_str(&format!("scan_incomplete_errors={}\n", result.error_count));
     }
     push_node(&mut out, &result.root, 0);
+    out
+}
+
+/// macOS's Available figure and what follows from it: the purgeable part, and
+/// capacity minus Available, which is what System Settings shows as used.
+fn push_available(out: &mut String, total: u64, free: u64, available: Option<u64>) {
+    let Some(available) = available else {
+        return;
+    };
+    out.push_str(&format!("volume_available_bytes={available}\n"));
+    out.push_str(&format!(
+        "volume_purgeable_bytes={}\n",
+        available.saturating_sub(free)
+    ));
+    out.push_str(&format!(
+        "volume_unavailable_bytes={}\n",
+        total.saturating_sub(available)
+    ));
+}
+
+/// Volume figures for `path` without walking it, for the `--volume` CLI: the
+/// header lines `--scan` prints, then macOS's unfiltered Available answer for
+/// each mount it was asked about.
+pub fn format_volume(path: &Path) -> String {
+    let volume = volume_space(path);
+    let mut out = String::new();
+    out.push_str(&format!("volume_total_bytes={}\n", volume.total));
+    out.push_str(&format!("volume_free_bytes={}\n", volume.free));
+    if let Some(used) = volume.root_used {
+        out.push_str(&format!("volume_used_bytes={used}\n"));
+    }
+    push_available(&mut out, volume.total, volume.free, volume.available);
+    for (mount, raw) in raw_available(path) {
+        let raw = raw.map_or_else(|| "none".to_string(), |bytes| bytes.to_string());
+        out.push_str(&format!(
+            "macos_available_bytes[{}]={raw}\n",
+            mount.display()
+        ));
+    }
     out
 }
 

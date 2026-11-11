@@ -13,7 +13,7 @@ pub use ext::{
     ext_color, ext_description, ext_key, ext_label, format_scan_share, legend_of, share_px,
     LegendRow, Rgb, HIDDEN_KEY,
 };
-pub use format::{format_bytes, format_scan};
+pub use format::{format_bytes, format_scan, format_volume};
 pub use layout::{
     layout_items, layout_node, split_span, treemap_focus, Frame, LayoutItem, PxRect, Tile, Tiling,
 };

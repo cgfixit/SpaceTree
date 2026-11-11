@@ -87,19 +87,31 @@ struct ExtSum {
 pub struct ScanResult {
     pub root: Node,
     pub volume_total: u64,
-    /// Bytes the volume reports in use, as Finder's Get Info "Used" counts
-    /// them, only for a scan of a local macOS volume root. For `/` this is the
-    /// System volume plus its Data volume.
+    /// Bytes the volume holds on disk, as `df` prints in its Used column, only
+    /// for a scan of a local macOS volume root. For `/` this is the System
+    /// volume plus its Data volume. Purgeable space is part of it, so System
+    /// Settings, which counts that space as available, shows less.
     pub volume_used: Option<u64>,
-    /// Bytes free right now (`f_bavail`). macOS also lists purgeable space as
-    /// available, so Finder's "Available" can be larger.
+    /// Bytes not allocated right now (`f_bavail`), shared by every volume in
+    /// an APFS container.
     pub volume_free: u64,
+    /// What macOS calls Available: `volume_free` plus the purgeable space it
+    /// expects to clear on demand. `None` when macOS gives no such figure or
+    /// it adds nothing to `volume_free`, and for folder scans.
+    pub volume_available: Option<u64>,
     /// Part of `volume_used` that no file in the walk accounts for: local
     /// snapshots, folders macOS does not let this process read, and
     /// system-only data. Also present as the root's `Hidden space` child.
     pub hidden: u64,
     /// Failed directory reads or entry metadata reads. Zero means none were observed.
     pub error_count: u64,
+}
+
+impl ScanResult {
+    /// Bytes macOS counts as both in use on disk and available.
+    pub fn volume_purgeable(&self) -> Option<u64> {
+        Some(self.volume_available?.saturating_sub(self.volume_free))
+    }
 }
 
 /// Walk `path`. Follow a symlink-to-dir only at this user-chosen root (so `/tmp`
@@ -113,9 +125,8 @@ pub fn scan(path: &Path) -> io::Result<ScanResult> {
 
 /// Reuse the metadata already sent to the UI before the directory walk starts.
 pub(crate) fn scan_with_volume(path: &Path, volume: VolumeSpace) -> io::Result<ScanResult> {
-    // A whole-volume scan stays on that volume, as Finder's numbers do: other
-    // disks under /Volumes, devfs, and disk images mounted inside it are not
-    // part of its used space.
+    // A whole-volume scan stays on that volume: other disks under /Volumes,
+    // devfs, and disk images mounted inside it are not part of its used space.
     let skip = if volume.root_used.is_some() {
         foreign_mounts(path)
     } else {
@@ -159,6 +170,7 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
         volume_total,
         volume_used: volume.root_used,
         volume_free: volume.free,
+        volume_available: volume.available,
         hidden: 0,
         error_count: errors.into_inner(),
     })
@@ -168,7 +180,7 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
 pub const HIDDEN_NAME: &str = "Hidden space";
 
 /// Add the used bytes the walk could not see as one child of the root, so the
-/// root's total equals what macOS reports in use. A walk that found more than
+/// root's total equals the volume's on-disk used bytes. A walk that found more than
 /// the volume reports (unreadable clone extents counted in full) adds nothing.
 fn add_hidden_space(result: &mut ScanResult, used: u64) {
     let root = &mut result.root;
@@ -264,8 +276,7 @@ pub(crate) fn percent_of_disk(size: u64, volume_total: u64) -> f64 {
     }
 }
 
-/// Capacity, free space, and used space of the volume that holds `path`, as
-/// Finder reports them.
+/// Capacity, free space, and used space of the volume that holds `path`.
 ///
 /// macOS uses `statfs`: its block count is 64-bit. Darwin's `statvfs` stores
 /// `f_blocks` in a 32-bit `fsblkcnt_t`, which cannot describe a volume of
@@ -275,7 +286,17 @@ pub(crate) struct VolumeSpace {
     pub(crate) total: u64,
     /// Bytes available to a non-root process now (`f_bavail`).
     pub(crate) free: u64,
+    /// See [`ScanResult::volume_available`].
+    pub(crate) available: Option<u64>,
     pub(crate) root_used: Option<u64>,
+}
+
+/// macOS's Available figure, kept only when it says more than `free` does. A
+/// volume the system keeps no purgeable estimate for answers 0 or plain free
+/// space; neither is a purgeable figure to show.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn known_available(raw: Option<u64>, free: u64, total: u64) -> Option<u64> {
+    raw.filter(|&bytes| bytes > free && bytes <= total)
 }
 
 pub(crate) fn volume_space(path: &Path) -> VolumeSpace {
@@ -286,19 +307,26 @@ pub(crate) fn volume_space(path: &Path) -> VolumeSpace {
         };
         // The boot volume group: `/` is the sealed System volume, and the
         // firmlinks under it (/Users, /Applications, ...) lead into the Data
-        // volume. Finder's "Used" for Macintosh HD counts both.
+        // volume. Macintosh HD's used space counts both.
         let data = (mount_path(&s) == Path::new("/"))
             .then(|| statfs_of(Path::new("/System/Volumes/Data")))
             .flatten()
             .filter(|d| mount_path(d) == Path::new("/System/Volumes/Data"));
+        let total = s.f_blocks.saturating_mul(u64::from(s.f_bsize));
+        let free = s.f_bavail.saturating_mul(u64::from(s.f_bsize));
+        let root_used = local_volume_used(
+            path,
+            &s,
+            own_used(&s).saturating_add(data.as_ref().map_or(0, own_used)),
+        );
+        // Asked only for volume roots: the answer comes from a system
+        // service, and a folder scan shows no volume figures.
+        let raw = root_used.and_then(|_| important_available(&mount_path(&s)));
         VolumeSpace {
-            total: s.f_blocks.saturating_mul(u64::from(s.f_bsize)),
-            free: s.f_bavail.saturating_mul(u64::from(s.f_bsize)),
-            root_used: local_volume_used(
-                path,
-                &s,
-                own_used(&s).saturating_add(data.as_ref().map_or(0, own_used)),
-            ),
+            total,
+            free,
+            available: known_available(raw, free, total),
+            root_used,
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -315,6 +343,7 @@ pub(crate) fn volume_space(path: &Path) -> VolumeSpace {
         VolumeSpace {
             total: (s.f_blocks as u64).saturating_mul(s.f_frsize as u64),
             free: (s.f_bavail as u64).saturating_mul(s.f_frsize as u64),
+            available: None,
             root_used: None,
         }
     }
@@ -393,6 +422,129 @@ fn vol_space_used(mount: &Path) -> Option<u64> {
     u64::try_from(i64::from_ne_bytes(buf[4..12].try_into().ok()?)).ok()
 }
 
+/// Bytes macOS reports as available on the volume mounted at `mount` for data
+/// the user asked to store: free space plus the purgeable space it expects to
+/// clear on demand (local snapshots, caches, files iCloud also holds). This is
+/// the Available that Finder and System Settings show; `statfs` and
+/// `getattrlist` carry no purgeable figure. `None` when there is no answer.
+#[cfg(target_os = "macos")]
+pub(crate) fn important_available(mount: &Path) -> Option<u64> {
+    use std::ffi::c_void;
+
+    type CFTypeRef = *const c_void; // CFURLRef, CFStringRef, CFNumberRef, CFAllocatorRef
+    type CFIndex = isize; // signed long
+    type CFTypeID = usize; // unsigned long
+    type Boolean = u8; // unsigned char
+    const CF_NUMBER_SINT64_TYPE: CFIndex = 4; // kCFNumberSInt64Type
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    #[allow(non_upper_case_globals, non_snake_case)]
+    extern "C" {
+        // const CFStringRef, macOS 10.13 and later.
+        static kCFURLVolumeAvailableCapacityForImportantUsageKey: CFTypeRef;
+        fn CFURLCreateFromFileSystemRepresentation(
+            allocator: CFTypeRef,
+            buffer: *const u8,
+            buf_len: CFIndex,
+            is_directory: Boolean,
+        ) -> CFTypeRef;
+        fn CFURLCopyResourcePropertyForKey(
+            url: CFTypeRef,
+            key: CFTypeRef,
+            property_value_type_ref_ptr: *mut c_void,
+            error: *mut CFTypeRef,
+        ) -> Boolean;
+        fn CFGetTypeID(cf: CFTypeRef) -> CFTypeID;
+        fn CFNumberGetTypeID() -> CFTypeID;
+        fn CFNumberGetValue(
+            number: CFTypeRef,
+            the_type: CFIndex,
+            value_ptr: *mut c_void,
+        ) -> Boolean;
+        fn CFRelease(cf: CFTypeRef);
+    }
+
+    let bytes = mount.as_os_str().as_bytes();
+    if bytes.is_empty() || bytes.contains(&0) {
+        return None;
+    }
+    let len = CFIndex::try_from(bytes.len()).ok()?;
+    // SAFETY: `bytes` is valid for `len` bytes; a null allocator means the
+    // default one. The result is null or a URL this function owns.
+    let url = unsafe {
+        CFURLCreateFromFileSystemRepresentation(std::ptr::null(), bytes.as_ptr(), len, 1)
+    };
+    if url.is_null() {
+        return None;
+    }
+    let mut value: CFTypeRef = std::ptr::null();
+    // SAFETY: `url` is a live CFURL, the key is a constant CFString exported
+    // by CoreFoundation, and `value` is a valid out-param for one CFTypeRef.
+    // A null error pointer asks for no CFError, so there is none to release.
+    // A CFURL caches resource values; this one is new, so nothing is stale.
+    let ok = unsafe {
+        CFURLCopyResourcePropertyForKey(
+            url,
+            kCFURLVolumeAvailableCapacityForImportantUsageKey,
+            (&mut value as *mut CFTypeRef).cast(),
+            std::ptr::null_mut(),
+        )
+    };
+    let mut available: i64 = 0;
+    // Success with a null value means the volume has no such property.
+    // SAFETY: `value` is non-null and checked to be a CFNumber before it is
+    // read as one; `available` is a valid SInt64 out-param.
+    let got = ok != 0
+        && !value.is_null()
+        && unsafe {
+            CFGetTypeID(value) == CFNumberGetTypeID()
+                && CFNumberGetValue(
+                    value,
+                    CF_NUMBER_SINT64_TYPE,
+                    (&mut available as *mut i64).cast(),
+                ) != 0
+        };
+    // SAFETY: both are owned here and released once; CFRelease rejects null.
+    unsafe {
+        if !value.is_null() {
+            CFRelease(value);
+        }
+        CFRelease(url);
+    }
+    if !got {
+        return None;
+    }
+    u64::try_from(available).ok()
+}
+
+/// The unfiltered [`important_available`] answer for the volume that holds
+/// `path` and, for the boot volume, for its Data volume: what `--volume`
+/// prints so the figure can be compared with macOS's own windows.
+pub(crate) fn raw_available(path: &Path) -> Vec<(PathBuf, Option<u64>)> {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(s) = statfs_of(path) else {
+            return Vec::new();
+        };
+        let mut mounts = vec![mount_path(&s)];
+        if mounts[0] == Path::new("/") {
+            mounts.push(PathBuf::from("/System/Volumes/Data"));
+        }
+        mounts
+            .into_iter()
+            .map(|mount| {
+                let raw = important_available(&mount);
+                (mount, raw)
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Vec::new()
+    }
+}
+
 /// Used bytes of the local volume mounted at `path`, given `group_used`: its
 /// own used bytes plus, for `/`, its Data volume's. `None` unless `path` is a
 /// local mount root.
@@ -404,9 +556,9 @@ fn local_volume_used(path: &Path, space: &libc::statfs, group_used: u64) -> Opti
     if fs::canonicalize(path).ok()? != fs::canonicalize(mount_path(space)).ok()? {
         return None;
     }
-    // Everything not available is the most a volume group can use: other APFS
-    // volumes (VM, Preboot, Recovery) share the container but are not Used
-    // in Finder.
+    // Everything not free is the most a volume group can use: other APFS
+    // volumes (VM, Preboot, Recovery) share the container but are not part
+    // of this volume's used space.
     let container_used = space
         .f_blocks
         .saturating_sub(space.f_bavail)
@@ -1248,7 +1400,7 @@ mod volume_tests {
         assert_eq!(local_volume_used(Path::new("/"), &stats, 0), None);
     }
 
-    /// `df -k` prints Used as (f_blocks - f_bfree) in KiB for each volume.
+    /// `df -k` prints each volume's Used in KiB from `ATTR_VOL_SPACEUSED`.
     fn df_used_kib(path: &str) -> u64 {
         let out = std::process::Command::new("/bin/df")
             .args(["-k", path])
@@ -1291,6 +1443,22 @@ mod volume_tests {
             String::from_utf8_lossy(&df.stdout)
         );
         assert!(used + volume.free <= volume.total);
+    }
+
+    #[test]
+    fn boot_volume_available_is_free_space_plus_purgeable_or_unknown() {
+        let volume = volume_space(Path::new("/"));
+        let raw = important_available(Path::new("/"));
+        eprintln!(
+            "total={} free={} important_available={raw:?} kept={:?}",
+            volume.total, volume.free, volume.available
+        );
+        if let Some(available) = volume.available {
+            assert!(available > volume.free && available <= volume.total);
+        }
+        // A folder is not a volume root, so it gets no volume figures.
+        assert_eq!(volume_space(&std::env::temp_dir()).available, None);
+        assert_eq!(important_available(Path::new("")), None);
     }
 
     #[test]
@@ -1356,6 +1524,7 @@ mod whole_volume_tests {
         let volume = VolumeSpace {
             total: 1 << 30,
             free: 1 << 29,
+            available: Some(3 << 28),
             root_used: Some(1 << 20),
         };
         let mut result = scan_inner(&dir, volume, &skip).unwrap();
@@ -1375,6 +1544,17 @@ mod whole_volume_tests {
         assert_eq!(hidden.size, result.hidden);
         assert_eq!(hidden.color_ext, HIDDEN_KEY);
         assert_eq!(hidden.files, 0);
+        assert_eq!(result.volume_purgeable(), Some(1 << 28));
+    }
+
+    #[test]
+    fn available_is_kept_only_when_it_adds_purgeable_space_to_free() {
+        assert_eq!(known_available(Some(300), 200, 1000), Some(300));
+        // No answer, zero, plain free space, or more than the volume holds.
+        assert_eq!(known_available(None, 200, 1000), None);
+        assert_eq!(known_available(Some(0), 200, 1000), None);
+        assert_eq!(known_available(Some(200), 200, 1000), None);
+        assert_eq!(known_available(Some(1001), 200, 1000), None);
     }
 
     #[test]

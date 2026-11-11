@@ -7,12 +7,17 @@ fn main() {
                 print!("{}", spacetree::format_scan(&result));
                 if result.error_count > 0 {
                     eprintln!(
-                        "scan incomplete: {} read {}; sizes are partial",
+                        "scan incomplete: {} read {}; {}",
                         result.error_count,
                         if result.error_count == 1 {
                             "error"
                         } else {
                             "errors"
+                        },
+                        if result.volume_used.is_some() {
+                            "what could not be read is counted in Hidden space"
+                        } else {
+                            "sizes are partial"
                         }
                     );
                     std::process::exit(1);
@@ -25,9 +30,15 @@ fn main() {
         }
         return;
     }
+    if let Some(i) = args.iter().position(|a| a == "--volume") {
+        let path = args.get(i + 1).cloned().unwrap_or_else(|| "/".into());
+        print!("{}", spacetree::format_volume(std::path::Path::new(&path)));
+        return;
+    }
     if args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!("SpaceTree — macOS disk usage analyzer");
         eprintln!("  spacetree --scan <path>       print expandable tree");
+        eprintln!("  spacetree --volume [path]     print the volume's size figures, no scan");
         eprintln!("  spacetree --gui-scan <path>   open the GUI and scan");
         eprintln!("  spacetree                     open the GUI");
         return;

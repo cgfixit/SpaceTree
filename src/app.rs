@@ -22,7 +22,7 @@ use crate::{
 pub const APP_TITLE: &str = "SpaceTree";
 
 /// What the synthetic `Hidden space` row stands for.
-const HIDDEN_HELP: &str = "Space the volume reports in use that no readable file accounts for: local Time Machine snapshots, folders macOS keeps from this app (grant Full Disk Access to see more), and system-only data. It makes the total match Finder's Used.";
+const HIDDEN_HELP: &str = "Space in use on this volume that the scan found in no file it could read: local snapshots, folders macOS did not let SpaceTree read, and system data outside the scanned folders. With it, the root row equals the volume's used space on disk. To move more of it into folders, turn on Full Disk Access for SpaceTree in System Settings › Privacy & Security, then scan again.";
 
 enum Phase {
     Idle,
@@ -316,18 +316,16 @@ impl eframe::App for SpaceTreeApp {
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             if self.volume.root_used.is_some() && self.volume.total > 0 {
-                let available = self.volume.free.min(self.volume.total);
-                let free_percent = available as f64 / self.volume.total as f64 * 100.0;
                 egui::Frame::NONE
                     .fill(Color32::from_rgba_unmultiplied(70, 180, 95, 55))
                     .inner_margin(egui::vec2(5.0, 2.0))
                     .show(ui, |ui| {
-                        ui.monospace(format!(
-                            "Whole volume: ~{free_percent:.0}% free ({} available of {})",
-                            format_bytes(available),
-                            format_bytes(self.volume.total),
+                        ui.monospace(volume_summary(
+                            self.volume.total,
+                            self.volume.free,
+                            self.volume.available,
                         ))
-                        .on_hover_text("Free space at scan start, shared by every volume in the APFS container. Finder's \"Available\" also counts purgeable space, so it can be larger.");
+                        .on_hover_text("Free now is space nothing occupies at scan start, shared by every volume in the APFS container. Available is what macOS shows in Finder and System Settings: free space plus purgeable space, which is in use on disk until macOS clears it to make room (local snapshots, caches, files iCloud also holds).");
                     });
             }
             ui.horizontal(|ui| match &self.phase {
@@ -349,10 +347,23 @@ impl eframe::App for SpaceTreeApp {
                                 .on_hover_text(HIDDEN_HELP);
                         }
                         ui.separator();
-                        ui.label(format!("volume {}", format_bytes(result.volume_total)))
-                            .on_hover_text(format!("{} bytes", result.volume_total));
-                        ui.separator();
-                        ui.label(format_percent(result.root.percent_of_disk));
+                        if let Some(used) = result.volume_used {
+                            ui.label(format!("on disk {}", format_bytes(used)))
+                                .on_hover_text(format!(
+                                    "{used} bytes in use on this volume, purgeable space included"
+                                ));
+                            ui.separator();
+                            ui.label(format!("capacity {}", format_bytes(result.volume_total)))
+                                .on_hover_text(format!("{} bytes", result.volume_total));
+                        } else {
+                            ui.label(format!("volume {}", format_bytes(result.volume_total)))
+                                .on_hover_text(format!("{} bytes", result.volume_total));
+                            ui.separator();
+                            ui.label(format!(
+                                "{} of volume",
+                                format_percent(result.root.percent_of_disk)
+                            ));
+                        }
                         if let Some(sel) = &self.selected {
                             ui.separator();
                             if let Some(node) = find_node(&result.root, sel) {
@@ -372,12 +383,17 @@ impl eframe::App for SpaceTreeApp {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
                         format!(
-                            "Scan incomplete: {} read {}. Sizes are partial.",
+                            "Scan incomplete: {} read {}. {}",
                             result.error_count,
                             if result.error_count == 1 {
                                 "error"
                             } else {
                                 "errors"
+                            },
+                            if result.hidden > 0 {
+                                "What could not be read is counted in Hidden space, not in its folder. Full Disk Access (System Settings › Privacy & Security) lets a new scan read more."
+                            } else {
+                                "Sizes are partial."
                             }
                         ),
                     );
@@ -490,7 +506,9 @@ impl SpaceTreeApp {
             return;
         };
         if self.selected_is_hidden() {
-            self.last_note = Some(format!("{HIDDEN_NAME} is not a file: {HIDDEN_HELP}"));
+            self.last_note = Some(format!(
+                "{HIDDEN_NAME} is not a file, so there is nothing to reveal. Hover its row or tile for what it holds."
+            ));
             return;
         }
         match reveal_in_finder(path) {
@@ -612,6 +630,10 @@ impl SpaceTreeApp {
                                                     format!("{} → {}", node.name, target.display()),
                                                 );
                                             }
+                                            Err(_) if node.color_ext == HIDDEN_KEY => {
+                                                ui.add(Label::new(&node.name).truncate())
+                                                    .on_hover_text(HIDDEN_HELP);
+                                            }
                                             Err(_) => {
                                                 ui.add(Label::new(&node.name).truncate());
                                             }
@@ -651,16 +673,7 @@ impl SpaceTreeApp {
                                                     .monospace()
                                                     .color(green),
                                                 )
-                                                .on_hover_text(format!(
-                                                    "Volume: {} used of {} (Finder's Used); {} free now\n{} in files, {} hidden",
-                                                    format_bytes(used),
-                                                    format_bytes(result.volume_total),
-                                                    format_bytes(result.volume_free),
-                                                    format_bytes(
-                                                        result.root.size.saturating_sub(result.hidden)
-                                                    ),
-                                                    format_bytes(result.hidden),
-                                                ));
+                                                .on_hover_text(fullness_help(result, used));
                                             } else {
                                                 ui.monospace(format_scan_share(
                                                     node.size, root_size,
@@ -1341,6 +1354,68 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// The line shown as soon as a whole-volume scan starts: free space now, and
+/// macOS's Available when it counts purgeable space on top of that.
+fn volume_summary(total: u64, free: u64, available: Option<u64>) -> String {
+    let free = free.min(total);
+    let percent = |bytes: u64| bytes as f64 / total as f64 * 100.0;
+    let mut line = format!(
+        "Whole volume: ~{:.0}% free now ({} of {})",
+        percent(free),
+        format_bytes(free),
+        format_bytes(total)
+    );
+    if let Some(available) = available {
+        line.push_str(&format!(
+            "  ·  macOS: {} available (~{:.0}%), ~{} of it purgeable",
+            format_bytes(available),
+            percent(available),
+            format_bytes(available.saturating_sub(free))
+        ));
+    }
+    line
+}
+
+/// Tooltip of the green `~N% full` cell: where the on-disk figure comes from
+/// and why System Settings can show a lower one.
+fn fullness_help(result: &ScanResult, used: u64) -> String {
+    let total = result.volume_total;
+    let mut lines = vec![
+        format!(
+            "On disk: {} used of {}",
+            format_bytes(used),
+            format_bytes(total)
+        ),
+        format!(
+            "{} in files read  ·  {} hidden",
+            format_bytes(result.root.size.saturating_sub(result.hidden)),
+            format_bytes(result.hidden)
+        ),
+        format!(
+            "Free now: {}  ·  other volumes on this disk: {}",
+            format_bytes(result.volume_free),
+            format_bytes(
+                total
+                    .saturating_sub(result.volume_free)
+                    .saturating_sub(used)
+            )
+        ),
+    ];
+    match result.volume_available {
+        Some(available) => lines.push(format!(
+            "macOS counts ~{} of the used space as purgeable and so as available: {} available, {} used (~{:.0}% full), the figures System Settings shows",
+            format_bytes(available.saturating_sub(result.volume_free)),
+            format_bytes(available),
+            format_bytes(total.saturating_sub(available)),
+            total.saturating_sub(available) as f64 / total as f64 * 100.0
+        )),
+        None => lines.push(
+            "System Settings can show less used: it counts purgeable space as available".into(),
+        ),
+    }
+    lines.join("\n")
+}
+
 /// Tooltip text for the tile under the pointer, or for the folder whose label
 /// is under it.
 fn hover_lines(
@@ -1368,7 +1443,7 @@ fn hover_lines(
     if tile.color_ext == HIDDEN_KEY {
         lines.push(HIDDEN_NAME.into());
         lines.push(format!(
-            "{}  ·  used, not in any file",
+            "{}  ·  in use on disk, in no file this scan read",
             format_bytes(tile.weight)
         ));
         lines.push(HIDDEN_HELP.into());
