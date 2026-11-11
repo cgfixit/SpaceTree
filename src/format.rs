@@ -6,6 +6,12 @@ use crate::{Node, ScanResult, HIDDEN_KEY};
 
 /// Stable text dump of a scan for the `--scan` CLI and tests.
 pub fn format_scan(result: &ScanResult) -> String {
+    format_scan_to_depth(result, usize::MAX)
+}
+
+/// [`format_scan`] with rows no deeper than `max_depth` below the root, for
+/// `--scan <path> --depth <n>`. The header and every total are unchanged.
+pub fn format_scan_to_depth(result: &ScanResult, max_depth: usize) -> String {
     let mut out = String::new();
     out.push_str(&format!("volume_total_bytes={}\n", result.volume_total));
     out.push_str(&format!("root_size_bytes={}\n", result.root.size));
@@ -23,7 +29,7 @@ pub fn format_scan(result: &ScanResult) -> String {
     if result.error_count > 0 {
         out.push_str(&format!("scan_incomplete_errors={}\n", result.error_count));
     }
-    push_node(&mut out, &result.root, 0);
+    push_node(&mut out, &result.root, 0, max_depth);
     out
 }
 
@@ -65,7 +71,7 @@ pub fn format_volume(path: &Path) -> String {
     out
 }
 
-fn push_node(out: &mut String, node: &Node, depth: usize) {
+fn push_node(out: &mut String, node: &Node, depth: usize, max_depth: usize) {
     for _ in 0..depth {
         out.push_str("  ");
     }
@@ -85,8 +91,11 @@ fn push_node(out: &mut String, node: &Node, depth: usize) {
         kind,
         node.name
     ));
+    if depth >= max_depth {
+        return;
+    }
     for child in &node.children {
-        push_node(out, child, depth + 1);
+        push_node(out, child, depth + 1, max_depth);
     }
 }
 
