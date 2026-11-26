@@ -9,12 +9,13 @@ mod layout;
 mod ollama;
 mod scan;
 mod sort;
+mod volumes;
 
 pub use ext::{
     ext_color, ext_description, ext_key, ext_label, format_scan_share, legend_of, share_px,
     LegendRow, Rgb, HIDDEN_KEY,
 };
-pub use format::{format_bytes, format_scan, format_scan_to_depth, format_volume};
+pub use format::{format_bytes, format_refusals, format_scan, format_scan_to_depth, format_volume};
 pub use layout::{
     layout_items, layout_node, split_span, treemap_focus, Frame, LayoutItem, PxRect, Tile, Tiling,
 };
@@ -22,5 +23,11 @@ pub use ollama::{
     blob_notes, default_models_dir, format_ollama, BlobNote, BlobUse, OllamaLayer, OllamaModel,
     OllamaStore,
 };
-pub use scan::{scan, Node, ScanResult, BLOCKED_SAMPLE, DATA_ONLY_NAME, HIDDEN_NAME};
+pub use scan::{
+    full_disk_access, scan, Blocked, DiskAccess, Node, Refusal, ScanResult, BLOCKED_SAMPLE,
+    DATA_ONLY_NAME, HIDDEN_NAME,
+};
 pub use sort::{sort_children, sort_tree, SortColumn};
+pub use volumes::{
+    format_volumes, fs_label, mounted_volumes, scan_note, MountedVolume, VolumeKind,
+};

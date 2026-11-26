@@ -22,10 +22,31 @@ Scanning `/` or another local macOS volume root adds what a folder scan does not
 
 - **Green figures.** The root row's Percentage cell is green and shows `~N% full`, and a green `Whole volume: ~N% free` line appears as soon as the scan starts. Folder scans show neither.
 - **They match System Settings › Storage.** macOS counts purgeable space (local snapshots, caches, files iCloud also holds) as available although it is still on disk. SpaceTree asks macOS for that Available figure, so used is capacity minus available, and the green line says how much of it is purgeable. The cell's tooltip gives the on-disk figure `df` prints. A volume macOS reports no purgeable space for uses the `df` figures.
-- **Hidden space.** One extra row holds used space the scan found in no file it could read: folders macOS did not let SpaceTree read, local snapshots, and system data outside the scanned folders. With it, the root row equals the used figure above. Purgeable files the scan did read still count at full size in their folders, so the row can understate what is hidden.
-- **Blocked folders.** A scan that could not read everything keeps a warning in the status bar: how many folders the system refused to open, and how many of those by macOS privacy protection versus file permissions. Hover it for their paths. Full Disk Access for SpaceTree (System Settings › Privacy & Security) opens the privacy ones; folders of other users or the system stay closed.
+- **Hidden space.** One extra row holds used space the scan found in no file it could read. With it, the root row equals the used figure above. Hover it for its two parts:
+  - *Outside this volume:* the other volumes of the same APFS container (VM swap, Preboot, Recovery, Update), less purgeable space. System Settings counts them as used, and no permission lets a scan into them. On a GitHub macOS runner this is about 9 GB of a 10.8 GB Hidden space. `--scan` prints it as `hidden_outside_bytes`.
+  - *On this volume:* folders the scan could not open, snapshots, and file system metadata. Purgeable files the scan did read still count at full size in their folders, so this part can understate what is hidden.
+- **Refused folders.** A scan that could not read everything keeps a line in the status bar that says why each folder was refused. Hover it for the paths.
+  - *System-only:* folders a system account owns and keeps closed (on a GitHub macOS runner: `/private/var/spool/postfix/*`, `/usr/sbin/authserver`). Only root reads them, on every Mac, with or without Full Disk Access. When these are the only refusals the line is grey and says so.
+  - *Privacy-protected:* macOS privacy protection, while Full Disk Access is not in effect. Turning it on opens them.
+  - *Protected by macOS:* refused although Full Disk Access is in effect (System Integrity Protection, data vaults). No setting opens them.
+  - *File permissions:* another user's folders, or your own without read permission.
 - **The Data volume.** `/` shows the Data volume only through its firmlinks (`/Users`, `/Applications`, …). A scan of `/` also walks what the Data volume keeps outside them and lists it as `System/Volumes/Data`, so readable files there are no longer part of Hidden space.
 - **One volume only.** The scan does not enter other mounts (`/Volumes/*`, mounted disk images), also when the root is reached through a symlink.
+
+### Full Disk Access is on, but folders are still refused
+
+SpaceTree checks whether macOS actually lets it read privacy-protected files before each scan, and says so when it does not. The usual causes:
+
+- **The app was updated.** SpaceTree is ad-hoc signed, without an Apple Developer ID, so macOS cannot tell a new build from a different app, and a grant made for the old copy does not apply to the new one, although System Settings still shows SpaceTree as allowed. Remove SpaceTree from the Full Disk Access list with the − button, add the new copy with +, and scan again.
+- **You ran the command line.** For `spacetree --scan` started from Terminal, macOS checks the terminal app's grant, not SpaceTree's.
+- **The folders are system-only.** Full Disk Access does not make a user root. Folders a system account owns stay closed, and they are counted in Hidden space.
+
+## Disks, USB drives, and network shares
+
+The **Volumes** button lists what is mounted: the startup disk, other disks (APFS, Mac OS Extended, ExFAT, MS-DOS (FAT), NTFS, disk images), and network shares (SMB, AFP, NFS, WebDAV), each with its file system and free space. Choosing one scans it. `spacetree --volumes` prints the same list. Mounts macOS hides from Finder (`nobrowse`), such as the boot volume group's `/System/Volumes/*` and autofs maps, are not listed.
+
+- **A local disk's root** scans as a whole volume, as described above.
+- **A network share** scans like a folder: no fullness cell and no Hidden space, because the server's totals belong to the whole server volume, not to the share. Every folder listing is a round trip to the server, so a large share takes longer than a local disk.
 
 ## How sizes are measured
 
@@ -47,12 +68,14 @@ Ollama stores each model layer once as `~/.ollama/models/blobs/sha256-<hash>`, s
 ```bash
 cargo run -- --scan /path/to/folder   # text report of a scan (--depth N limits the rows)
 cargo run -- --volume /               # volume figures only, no scan
+cargo run -- --volumes                # mounted disks and network shares
 cargo run -- --ollama                 # $OLLAMA_MODELS, or ~/.ollama/models
 cargo run -- --gui-scan /path         # open the app and scan
 ```
 
-- `--scan` prints header lines, starting with `volume_total_bytes` and `root_size_bytes`, then one indented line per node. A whole-volume scan adds `volume_used_bytes`, `hidden_bytes`, `volume_on_disk_bytes`, and, when macOS reports purgeable space, `volume_available_bytes` and `volume_purgeable_bytes`. If entries could not be read it adds `scan_incomplete_errors`, lists the refused folders on stderr, and exits nonzero.
-- `--volume` prints the same `volume_*` lines, then `macos_available_bytes[<mount>]`, the unfiltered answer from macOS. Use it to compare with System Settings. macOS refreshes these estimates on its own schedule, so expect close, not identical.
+- `--scan` prints header lines, starting with `volume_total_bytes` and `root_size_bytes`, then one indented line per node. A whole-volume scan adds `volume_used_bytes`, `hidden_bytes`, `hidden_outside_bytes`, `volume_on_disk_bytes`, and, when macOS reports purgeable space, `volume_available_bytes` and `volume_purgeable_bytes`. If entries could not be read it adds `scan_incomplete_errors`, lists the refused folders on stderr with the reason for each, and exits nonzero, also when every refusal is system-only.
+- `--volume` prints the same `volume_*` lines, then `full_disk_access=granted` or `denied` on macOS, then `macos_available_bytes[<mount>]`, the unfiltered answer from macOS. Use it to compare with System Settings. macOS refreshes these estimates on its own schedule, so expect close, not identical.
+- `--volumes` prints one line per mounted volume: kind (`startup`, `local`, `network`), file system, free space, capacity, and mount point.
 
 ## Build and package
 
@@ -84,7 +107,8 @@ It times alternating CLI scans of a temporary 6,000-file tree and rejects differ
 - `src/scan.rs` walks the tree and reads sizes and volume figures.
 - `src/layout.rs` places the treemap.
 - `src/app.rs` draws the table, the map, and the legend.
-- `src/format.rs` prints the `--scan` and `--volume` reports.
+- `src/format.rs` prints the `--scan` and `--volume` reports and the refused-folder lines.
+- `src/volumes.rs` lists mounted disks and network shares for the Volumes button and `--volumes`.
 - `src/ollama.rs` maps Ollama blobs to models.
 
 ## License

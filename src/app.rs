@@ -16,14 +16,12 @@ use crate::finder::reveal_in_finder;
 use crate::scan::{scan_with_volume, volume_space, VolumeSpace};
 use crate::{
     ext_color, ext_description, ext_label, format_bytes, format_scan_share, layout_node, legend_of,
-    share_px, sort_tree, BlobNote, LegendRow, Node, PxRect, ScanResult, SortColumn, Tiling,
-    HIDDEN_KEY, HIDDEN_NAME,
+    mounted_volumes, scan_note, share_px, sort_tree, BlobNote, DiskAccess, LegendRow,
+    MountedVolume, Node, PxRect, ScanResult, SortColumn, Tiling, VolumeKind, HIDDEN_KEY,
+    HIDDEN_NAME,
 };
 
 pub const APP_TITLE: &str = "SpaceTree";
-
-/// What the synthetic `Hidden space` row stands for.
-const HIDDEN_HELP: &str = "Space macOS counts as used on this volume that the scan found in no file it could read: folders macOS did not let SpaceTree read, local snapshots, and system data outside the scanned folders. With it, the root row equals the used space System Settings shows. To move more of it into folders, turn on Full Disk Access for SpaceTree in System Settings › Privacy & Security, then scan again.";
 
 enum Phase {
     Idle,
@@ -77,6 +75,10 @@ struct SpaceTreeApp {
     zoom: Option<PathBuf>,
     /// Extension key under the pointer in the legend; the map dims the rest.
     legend_hover: Option<String>,
+    /// What this scan's `Hidden space` row holds, written once per scan.
+    hidden_help: String,
+    /// Mounted volumes, read when the Volumes menu opens.
+    volumes: Option<Vec<MountedVolume>>,
 }
 
 impl SpaceTreeApp {
@@ -103,6 +105,8 @@ impl SpaceTreeApp {
             map_cache: None,
             zoom: None,
             legend_hover: None,
+            hidden_help: String::new(),
+            volumes: None,
         }
     }
 
@@ -179,6 +183,7 @@ impl SpaceTreeApp {
                     self.map_cache = None;
                     self.expanded.clear();
                     self.expanded.insert(finished.result.root.path.clone());
+                    self.hidden_help = hidden_help(&finished.result);
                     self.result = Some(finished.result);
                     self.phase = Phase::Ready;
                     break;
@@ -318,6 +323,13 @@ impl eframe::App for SpaceTreeApp {
                             self.path_text = p.to_string_lossy().into_owned();
                         }
                     }
+                    if let Some(path) = ui
+                        .add_enabled_ui(!scanning, |ui| self.volumes_menu(ui))
+                        .inner
+                    {
+                        self.path_text = path.to_string_lossy().into_owned();
+                        self.start_scan(ctx);
+                    }
                     let edit = ui.add(
                         TextEdit::singleline(&mut self.path_text)
                             .hint_text("Folder to scan")
@@ -358,7 +370,7 @@ impl eframe::App for SpaceTreeApp {
                         if result.hidden > 0 {
                             ui.separator();
                             ui.label(format!("hidden {}", format_bytes(result.hidden)))
-                                .on_hover_text(HIDDEN_HELP);
+                                .on_hover_text(&self.hidden_help);
                         }
                         ui.separator();
                         if let Some(used) = result.volume_used {
@@ -394,10 +406,13 @@ impl eframe::App for SpaceTreeApp {
             });
             if let Some(result) = &self.result {
                 if result.error_count > 0 {
-                    let warning = ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        incomplete_warning(result),
-                    );
+                    let (line, act) = incomplete_warning(result);
+                    let color = if act {
+                        ui.visuals().warn_fg_color
+                    } else {
+                        ui.visuals().weak_text_color()
+                    };
+                    let warning = ui.colored_label(color, line);
                     if !result.blocked.is_empty() {
                         warning.on_hover_text(blocked_help(result));
                     }
@@ -438,7 +453,9 @@ impl eframe::App for SpaceTreeApp {
                                 .weak(),
                             );
                             ui.add_space(6.0);
-                            ui.label("Enter a folder above (or Browse…) and press Scan.");
+                            ui.label(
+                                "Enter a folder above and press Scan, or pick a disk or share under Volumes.",
+                            );
                         }
                         Phase::Ready => {}
                     }
@@ -482,6 +499,57 @@ impl eframe::App for SpaceTreeApp {
 }
 
 impl SpaceTreeApp {
+    /// The Volumes menu: mounted disks and network shares. Returns the one
+    /// picked. The list is read when the menu opens, not every frame.
+    fn volumes_menu(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
+        let menu = ui.menu_button("Volumes", |ui| {
+            let volumes = self.volumes.get_or_insert_with(mounted_volumes);
+            let mut picked = None;
+            let mut heading = None;
+            for v in volumes.iter() {
+                if heading != Some(v.kind) {
+                    heading = Some(v.kind);
+                    ui.label(
+                        egui::RichText::new(match v.kind {
+                            VolumeKind::Startup => "Startup disk",
+                            VolumeKind::Local => "Other disks",
+                            VolumeKind::Network => "Network shares",
+                        })
+                        .small()
+                        .weak(),
+                    );
+                }
+                let text = format!(
+                    "{}  ·  {}  ·  {} free",
+                    v.name(),
+                    v.fs_label(),
+                    format_bytes(v.free)
+                );
+                let hint = format!(
+                    "{}\n{}{}",
+                    v.path.display(),
+                    scan_note(v.kind),
+                    if v.read_only { "\nread-only" } else { "" }
+                );
+                if ui.button(text).on_hover_text(hint).clicked() {
+                    picked = Some(v.path.clone());
+                }
+            }
+            if volumes.is_empty() {
+                ui.label("No mounted volumes found");
+            }
+            if picked.is_some() {
+                ui.close_menu();
+            }
+            picked
+        });
+        if menu.response.clicked() {
+            // Read the mount table again the next time the menu draws.
+            self.volumes = None;
+        }
+        menu.inner.flatten()
+    }
+
     /// True when the selection is the synthetic `Hidden space` row.
     fn selected_is_hidden(&self) -> bool {
         let (Some(path), Some(result)) = (&self.selected, &self.result) else {
@@ -660,7 +728,7 @@ impl SpaceTreeApp {
                                             }
                                             Err(_) if node.color_ext == HIDDEN_KEY => {
                                                 ui.add(Label::new(&node.name).truncate())
-                                                    .on_hover_text(HIDDEN_HELP);
+                                                    .on_hover_text(&self.hidden_help);
                                             }
                                             Err(_) => {
                                                 ui.add(Label::new(&node.name).truncate());
@@ -1146,6 +1214,9 @@ impl SpaceTreeApp {
                 if let Some(note) = self.ollama.get(&tile.path) {
                     lines.extend(note.detail.iter().cloned());
                 }
+                if tile.color_ext == HIDDEN_KEY {
+                    lines.push(self.hidden_help.clone());
+                }
             }
             lines
         });
@@ -1392,8 +1463,11 @@ fn file_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// Status-bar warning for a scan that could not read everything.
-fn incomplete_warning(result: &ScanResult) -> String {
+/// Status-bar line for a scan that could not read everything, and whether
+/// it asks something of the user: privacy refusals Full Disk Access opens,
+/// folders closed by permissions, or failures that are not refusals. Folders
+/// only the system reads are expected on every Mac and need nothing.
+fn incomplete_warning(result: &ScanResult) -> (String, bool) {
     let plural = |n: u64, one: &str, many: &str| {
         if n == 1 {
             one.to_string()
@@ -1406,35 +1480,51 @@ fn incomplete_warning(result: &ScanResult) -> String {
         result.error_count,
         plural(result.error_count, "error", "errors")
     );
-    let privacy = result.privacy_count.min(result.blocked_count);
-    let permissions = result.blocked_count - privacy;
-    if result.blocked_count > 0 {
+    let blocked = result.blocked_count.min(result.error_count);
+    let permissions = result.permission_count();
+    if blocked > 0 {
+        let parts: Vec<String> = [
+            (result.system_count, "system-only"),
+            (result.protected_count, "protected by macOS"),
+            (result.privacy_count, "privacy-protected"),
+            (permissions, "closed by file permissions"),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} {what}"))
+        .collect();
         line.push_str(&format!(
-            " The system refused to open {} {} (hover for which)",
-            result.blocked_count,
-            plural(result.blocked_count, "folder", "folders")
+            " {} {} refused (hover for which): {}.",
+            blocked,
+            plural(blocked, "folder", "folders"),
+            parts.join(", ")
         ));
-        line.push_str(&match (privacy, permissions) {
-            (0, _) => ": file permissions, which Full Disk Access does not change.".to_string(),
-            (_, 0) => ": macOS privacy protection.".to_string(),
-            _ => format!(
-                ": {privacy} by macOS privacy protection, {permissions} by file permissions."
-            ),
-        });
+    }
+    let other = result.error_count - blocked;
+    if other > 0 && blocked > 0 {
+        line.push_str(&format!(
+            " {other} other {}.",
+            plural(other, "failure", "failures")
+        ));
     }
     if result.hidden > 0 {
-        line.push_str(" What could not be read is counted in Hidden space, not in its folder.");
-    } else if result.blocked_count > 0 {
+        line.push_str(" What could not be read is counted in Hidden space.");
+    } else if blocked > 0 {
         line.push_str(" Their contents are not counted.");
     } else {
         line.push_str(" Sizes are partial.");
     }
-    if privacy > 0 || (result.hidden > 0 && result.blocked_count == 0) {
-        line.push_str(
-            " Full Disk Access (System Settings › Privacy & Security) lets a new scan read more.",
-        );
+    let act = result.privacy_count > 0 || permissions > 0 || other > 0;
+    if result.privacy_count > 0 {
+        line.push_str(if result.disk_access == DiskAccess::Denied {
+            " Full Disk Access is off for this copy of SpaceTree. If System Settings › Privacy & Security shows it on, remove SpaceTree there and add it again: macOS counts each update as a new app."
+        } else {
+            " Full Disk Access (System Settings › Privacy & Security) lets a new scan read those."
+        });
+    } else if !act {
+        line.push_str(" That is expected: no setting opens them.");
     }
-    line
+    (line, act)
 }
 
 /// Tooltip of that warning: the folders the system refused to open.
@@ -1445,13 +1535,42 @@ fn blocked_help(result: &ScanResult) -> String {
             .blocked
             .iter()
             .take(24)
-            .map(|p| p.display().to_string()),
+            .map(|b| format!("{}  ({})", b.path.display(), b.kind.label())),
     );
     let shown = result.blocked.len().min(24) as u64;
     if result.blocked_count > shown {
         lines.push(format!("and {} more", result.blocked_count - shown));
     }
     lines.join("\n")
+}
+
+/// What this scan's `Hidden space` row holds: the part outside the volume,
+/// which no permission opens, and the part on it the walk could not read.
+fn hidden_help(result: &ScanResult) -> String {
+    let mut text = String::from(
+        "Space macOS counts as used on this volume that the scan found in no file it could read. With it, the root row equals the used space System Settings shows.",
+    );
+    if result.hidden_outside > 0 {
+        text.push_str(&format!(
+            "\n\n{} is outside this volume: the other volumes of its APFS container (VM swap, Preboot, Recovery, Update), less purgeable space. System Settings counts it as used, and no permission lets a scan into it.",
+            format_bytes(result.hidden_outside)
+        ));
+    }
+    let inside = result.hidden.saturating_sub(result.hidden_outside);
+    if inside > 0 {
+        text.push_str(&format!(
+            "\n\n{} is on this volume in no file the scan read: folders it could not open, snapshots, and file system metadata.",
+            format_bytes(inside)
+        ));
+        if result.privacy_count > 0 {
+            text.push_str(" Full Disk Access for SpaceTree (System Settings › Privacy & Security) moves the privacy-protected folders into the table on the next scan.");
+        } else if result.disk_access == DiskAccess::Granted {
+            text.push_str(
+                " Full Disk Access is on: what stays closed needs root or another user's rights.",
+            );
+        }
+    }
+    text
 }
 
 /// The line shown as soon as a whole-volume scan starts: what macOS counts
@@ -1538,7 +1657,6 @@ fn hover_lines(
             "{}  ·  used, in no file this scan read",
             format_bytes(tile.weight)
         ));
-        lines.push(HIDDEN_HELP.into());
     } else if tile.merged {
         lines.push("Other: smaller items".into());
         lines.push(format!(
