@@ -26,24 +26,7 @@ fn main() {
                             "sizes are partial"
                         }
                     );
-                    if result.blocked_count > 0 {
-                        eprintln!(
-                            "folders the system refused to open: {}",
-                            result.blocked_count
-                        );
-                        for path in &result.blocked {
-                            eprintln!("  {}", path.display());
-                        }
-                        if result.blocked_count > result.blocked.len() as u64 {
-                            eprintln!("  ...");
-                        }
-                        if result.privacy_count > 0 {
-                            eprintln!(
-                                "{} of them by macOS privacy protection: Full Disk Access opens those",
-                                result.privacy_count
-                            );
-                        }
-                    }
+                    eprint!("{}", spacetree::format_refusals(&result));
                     std::process::exit(1);
                 }
             }
@@ -52,6 +35,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        return;
+    }
+    if args.iter().any(|a| a == "--volumes") {
+        print!(
+            "{}",
+            spacetree::format_volumes(&spacetree::mounted_volumes())
+        );
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--volume") {
@@ -81,6 +71,7 @@ fn main() {
         eprintln!("  spacetree --scan <path>       print expandable tree");
         eprintln!("      --depth <n>               print rows no deeper than n below the root");
         eprintln!("  spacetree --volume [path]     print the volume's size figures, no scan");
+        eprintln!("  spacetree --volumes           list mounted disks and network shares to scan");
         eprintln!("  spacetree --ollama [dir]      list Ollama models with their blobs, read-only");
         eprintln!("  spacetree --gui-scan <path>   open the GUI and scan");
         eprintln!("  spacetree                     open the GUI");

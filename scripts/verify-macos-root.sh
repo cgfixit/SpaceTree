@@ -60,6 +60,17 @@ else
   fail=1
 fi
 
+# Hidden space splits into what lies outside this volume group's own used
+# figure (the container's other volumes) and what the walk missed on it.
+outside=$(field hidden_outside_bytes)
+if [ -z "$outside" ] || [ "$outside" -gt "$hidden" ]; then
+  printf 'FAIL  %-36s outside %s hidden %s\n' "hidden outside <= hidden" "$outside" "$hidden"
+  fail=1
+else
+  printf 'ok    %-36s outside %s + inside %s\n' "hidden space split" "$outside" $((hidden - outside))
+fi
+grep -E '^[0-9]+ ' "$err" | sed 's/^/info  refusals: /' || true
+
 # What the Data volume's own root added, and that none of it is a folder
 # `/` already shows through a firmlink.
 data=$(awk '

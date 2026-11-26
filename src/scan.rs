@@ -113,21 +113,36 @@ pub struct ScanResult {
     /// expects to clear on demand. `None` when macOS gives no such figure or
     /// it adds nothing to `volume_free`, and for folder scans.
     pub volume_available: Option<u64>,
-    /// Part of `volume_used` that no file in the walk accounts for: local
-    /// snapshots, folders macOS does not let this process read, and
-    /// system-only data. Also present as the root's `Hidden space` child.
+    /// Part of `volume_used` that no file in the walk accounts for. Also
+    /// present as the root's `Hidden space` child. It is
+    /// [`ScanResult::hidden_outside`] plus what the volume itself holds in no
+    /// file the walk read (unreadable folders, snapshots, file system
+    /// metadata), less purgeable files the walk counted.
     pub hidden: u64,
+    /// Part of `hidden` outside this volume's own used figure: `volume_used`
+    /// minus `volume_on_disk`. On APFS that is the other volumes of the same
+    /// container (VM swap, Preboot, Recovery, Update, any other volume) net
+    /// of purgeable space. No permission opens it to a walk.
+    pub hidden_outside: u64,
     /// Failed directory reads or entry metadata reads. Zero means none were observed.
     pub error_count: u64,
-    /// How many of those were folders the system refused to open: macOS
-    /// privacy protection (no Full Disk Access) or file permissions.
+    /// How many of those were folders the system refused to open. Each one
+    /// is one of the [`Refusal`] kinds counted below or plain permissions.
     pub blocked_count: u64,
-    /// How many of the blocked folders macOS privacy protection refused
-    /// (`EPERM`): the ones Full Disk Access opens. The rest are file
-    /// permissions, which need another user's rights.
+    /// Refused by macOS privacy protection while Full Disk Access was not in
+    /// effect: the ones turning it on opens.
     pub privacy_count: u64,
-    /// The first [`BLOCKED_SAMPLE`] such folders, sorted, to show which ones.
-    pub blocked: Vec<PathBuf>,
+    /// Refused by macOS (`EPERM`) although Full Disk Access was in effect:
+    /// System Integrity Protection or data vaults, which no setting opens.
+    pub protected_count: u64,
+    /// Folders a system account (root, `_spotlight`, `_postfix`, ...) owns
+    /// and keeps closed to others: only root reads them, on every Mac.
+    pub system_count: u64,
+    /// The first [`BLOCKED_SAMPLE`] refused folders, sorted by path.
+    pub blocked: Vec<Blocked>,
+    /// Whether macOS let this process read what privacy protection guards
+    /// when the scan started.
+    pub disk_access: DiskAccess,
 }
 
 /// How many refused folders a scan keeps by path.
@@ -138,6 +153,135 @@ impl ScanResult {
     pub fn volume_purgeable(&self) -> Option<u64> {
         Some(self.volume_available?.saturating_sub(self.volume_free))
     }
+
+    /// Refused folders that are neither privacy, protected, nor system ones:
+    /// file permissions or an ACL on a folder of a user account.
+    pub fn permission_count(&self) -> u64 {
+        self.blocked_count
+            .saturating_sub(self.privacy_count)
+            .saturating_sub(self.protected_count)
+            .saturating_sub(self.system_count)
+    }
+}
+
+/// A folder the system refused to open, and why.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Blocked {
+    pub path: PathBuf,
+    pub kind: Refusal,
+}
+
+/// Why a folder could not be opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Refusal {
+    /// macOS privacy protection, and Full Disk Access was not in effect.
+    Privacy,
+    /// macOS refused although Full Disk Access was in effect.
+    Protected,
+    /// Owned by a system account and closed to others.
+    System,
+    /// File permissions or an ACL on a user account's folder.
+    Permissions,
+}
+
+impl Refusal {
+    /// Short tag for lists of refused folders.
+    pub fn label(self) -> &'static str {
+        match self {
+            Refusal::Privacy => "privacy",
+            Refusal::Protected => "protected by macOS",
+            Refusal::System => "system, root only",
+            Refusal::Permissions => "permissions",
+        }
+    }
+}
+
+/// Whether this process can read files macOS privacy protection guards,
+/// which is what Full Disk Access grants.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiskAccess {
+    Granted,
+    Denied,
+    /// Not macOS, or no guarded file to try.
+    #[default]
+    Unknown,
+}
+
+/// User ids below this belong to system accounts: macOS starts user
+/// accounts at 501, most Linux distributions at 1000.
+const FIRST_USER_UID: u32 = if cfg!(target_os = "macos") { 500 } else { 1000 };
+
+/// Why a folder was refused, from the error, the folder's owner, this
+/// process's effective user, and whether Full Disk Access is in effect.
+pub(crate) fn refusal_kind(
+    err: &io::Error,
+    owner: Option<u32>,
+    me: u32,
+    access: DiskAccess,
+) -> Refusal {
+    // macOS answers EPERM for privacy protection, SIP, and data vaults, and
+    // EACCES for permission bits or an ACL.
+    if cfg!(target_os = "macos") && err.raw_os_error() == Some(libc::EPERM) {
+        return if access == DiskAccess::Granted {
+            Refusal::Protected
+        } else {
+            Refusal::Privacy
+        };
+    }
+    // `nobody` is a system account at the top of the range: -2 on macOS,
+    // 65534 on Linux.
+    let system = |uid: u32| uid < FIRST_USER_UID || uid == 65534 || uid >= 0xFFFF_FFFE;
+    match owner {
+        Some(uid) if uid != me && system(uid) => Refusal::System,
+        _ => Refusal::Permissions,
+    }
+}
+
+/// Files only macOS privacy protection guards; one opens with Full Disk
+/// Access in effect and fails with `EPERM` without it. Opened read-only and
+/// closed at once; nothing is read.
+#[cfg(target_os = "macos")]
+fn access_probes() -> Vec<PathBuf> {
+    let mut probes = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        probes.push(Path::new(&home).join("Library/Application Support/com.apple.TCC/TCC.db"));
+    }
+    probes.push(PathBuf::from(
+        "/Library/Application Support/com.apple.TCC/TCC.db",
+    ));
+    probes
+}
+
+/// Whether Full Disk Access is in effect for this process now. macOS keeps
+/// the grant per signed copy of an app, and it counts every ad-hoc signed
+/// build as a new one, so an app shown as allowed in System Settings can
+/// still be denied after an update.
+pub fn full_disk_access() -> DiskAccess {
+    #[cfg(target_os = "macos")]
+    {
+        for probe in access_probes() {
+            match fs::File::open(&probe) {
+                Ok(_) => return DiskAccess::Granted,
+                Err(e) if e.raw_os_error() == Some(libc::EPERM) => return DiskAccess::Denied,
+                Err(_) => continue,
+            }
+        }
+        DiskAccess::Unknown
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        DiskAccess::Unknown
+    }
+}
+
+/// Refused folders seen by the scan workers.
+#[derive(Default)]
+struct Refusals {
+    total: AtomicU64,
+    privacy: AtomicU64,
+    protected: AtomicU64,
+    system: AtomicU64,
+    sample: Mutex<Vec<Blocked>>,
 }
 
 /// Walk `path`. Follow a symlink-to-dir only at this user-chosen root (so `/tmp`
@@ -171,8 +315,8 @@ pub(crate) fn scan_with_volume(path: &Path, volume: VolumeSpace) -> io::Result<S
     result.volume_on_disk = volume.root_used;
     result.volume_free = volume.free;
     result.volume_available = volume.available;
-    if let Some(used) = volume.shown_used() {
-        add_hidden_space(&mut result, used);
+    if let (Some(used), Some(on_disk)) = (volume.shown_used(), volume.root_used) {
+        add_hidden_space(&mut result, used, on_disk);
     }
     Ok(result)
 }
@@ -183,9 +327,8 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
     let seen = Mutex::new(HashSet::new());
     let clones = CloneBook::default();
     let errors = AtomicU64::new(0);
-    let blocked_count = AtomicU64::new(0);
-    let privacy_count = AtomicU64::new(0);
-    let blocked = Mutex::new(Vec::new());
+    let refusals = Refusals::default();
+    let disk_access = full_disk_access();
     // The skip set holds real paths. A root reached through a symlink
     // (/Volumes/Macintosh HD for /) walks other names for the same folders.
     let real_root = if skip.is_empty() {
@@ -201,9 +344,9 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
         seen: &seen,
         clones: &clones,
         errors: &errors,
-        blocked_count: &blocked_count,
-        privacy_count: &privacy_count,
-        blocked: &blocked,
+        refusals: &refusals,
+        access: disk_access,
+        me: effective_uid(),
         twin: None,
     };
     let mut root = if lmeta.file_type().is_dir() {
@@ -241,15 +384,27 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
         volume_free: volume.free,
         volume_available: volume.available,
         hidden: 0,
+        hidden_outside: 0,
         error_count: errors.into_inner(),
-        blocked_count: blocked_count.into_inner(),
-        privacy_count: privacy_count.into_inner(),
+        blocked_count: refusals.total.into_inner(),
+        privacy_count: refusals.privacy.into_inner(),
+        protected_count: refusals.protected.into_inner(),
+        system_count: refusals.system.into_inner(),
         blocked: {
-            let mut paths = blocked.into_inner().unwrap_or_else(|e| e.into_inner());
+            let mut paths = refusals
+                .sample
+                .into_inner()
+                .unwrap_or_else(|e| e.into_inner());
             paths.sort();
             paths
         },
+        disk_access,
     })
+}
+
+fn effective_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
 }
 
 /// Mount point of the boot volume group's Data volume.
@@ -274,7 +429,9 @@ pub const HIDDEN_NAME: &str = "Hidden space";
 /// Add the used bytes the walk could not see as one child of the root, so the
 /// root's total equals the used space macOS shows. A walk that found more than
 /// the volume reports (unreadable clone extents counted in full) adds nothing.
-fn add_hidden_space(result: &mut ScanResult, used: u64) {
+/// `on_disk` is the volume's own used figure; what `used` holds beyond it is
+/// recorded as [`ScanResult::hidden_outside`].
+fn add_hidden_space(result: &mut ScanResult, used: u64, on_disk: u64) {
     let root = &mut result.root;
     if !root.is_dir {
         return;
@@ -284,6 +441,7 @@ fn add_hidden_space(result: &mut ScanResult, used: u64) {
         return;
     }
     result.hidden = hidden;
+    result.hidden_outside = used.saturating_sub(on_disk).min(hidden);
     root.children.push(Node {
         name: HIDDEN_NAME.to_string(),
         path: root.path.join(HIDDEN_NAME),
@@ -350,7 +508,7 @@ fn mount_points() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn mount_path(s: &libc::statfs) -> PathBuf {
+pub(crate) fn mount_path(s: &libc::statfs) -> PathBuf {
     let bytes: Vec<u8> = s
         .f_mntonname
         .iter()
@@ -1375,9 +1533,11 @@ struct Walk<'a> {
     errors: &'a AtomicU64,
     /// The scan root's real path, when it differs from `scan_root`.
     real_root: Option<&'a Path>,
-    blocked_count: &'a AtomicU64,
-    privacy_count: &'a AtomicU64,
-    blocked: &'a Mutex<Vec<PathBuf>>,
+    refusals: &'a Refusals,
+    /// Full Disk Access state when the scan started.
+    access: DiskAccess,
+    /// This process's effective user id.
+    me: u32,
     /// Set for the walk of the Data volume's own root: a folder that is the
     /// same folder under the second path was already walked from there.
     twin: Option<(&'a Path, &'a Path)>,
@@ -1432,22 +1592,33 @@ impl Walk<'_> {
         Some(node)
     }
 
-    /// Count a folder that could not be listed, and keep its path when the
-    /// system refused access.
+    /// Count a folder that could not be listed, and keep its path and the
+    /// kind of refusal when the system refused access.
     fn unreadable(&self, path: &Path, err: &io::Error) {
         self.errors.fetch_add(1, Ordering::Relaxed);
         if err.kind() != io::ErrorKind::PermissionDenied {
             return;
         }
-        self.blocked_count.fetch_add(1, Ordering::Relaxed);
-        // macOS answers EPERM for a privacy refusal and EACCES for
-        // permission bits or an ACL.
-        if cfg!(target_os = "macos") && err.raw_os_error() == Some(libc::EPERM) {
-            self.privacy_count.fetch_add(1, Ordering::Relaxed);
+        let r = self.refusals;
+        r.total.fetch_add(1, Ordering::Relaxed);
+        // The parent was listed, so the folder itself can still be stat'ed.
+        let owner = fs::symlink_metadata(path).ok().map(|m| m.uid());
+        let kind = refusal_kind(err, owner, self.me, self.access);
+        let counter = match kind {
+            Refusal::Privacy => Some(&r.privacy),
+            Refusal::Protected => Some(&r.protected),
+            Refusal::System => Some(&r.system),
+            Refusal::Permissions => None,
+        };
+        if let Some(counter) = counter {
+            counter.fetch_add(1, Ordering::Relaxed);
         }
-        let mut blocked = self.blocked.lock().unwrap_or_else(|e| e.into_inner());
-        if blocked.len() < BLOCKED_SAMPLE {
-            blocked.push(path.to_path_buf());
+        let mut sample = r.sample.lock().unwrap_or_else(|e| e.into_inner());
+        if sample.len() < BLOCKED_SAMPLE {
+            sample.push(Blocked {
+                path: path.to_path_buf(),
+                kind,
+            });
         }
     }
 
@@ -1755,10 +1926,16 @@ mod whole_volume_tests {
         let walked = result.root.size;
         let keep = fs::metadata(dir.join("keep.bin")).unwrap().blocks() * 512;
         assert_eq!(walked, keep, "a skipped mount adds nothing");
-        add_hidden_space(&mut result, 1 << 20);
+        // Used 1 MiB, of which the volume itself holds 768 KiB on disk.
+        add_hidden_space(&mut result, 1 << 20, 3 << 18);
         fs::remove_dir_all(&dir).unwrap();
         assert_eq!(result.root.size, 1 << 20, "root matches the volume's used");
         assert_eq!(result.hidden, (1 << 20) - walked);
+        assert_eq!(
+            result.hidden_outside,
+            1 << 18,
+            "used beyond the volume's own"
+        );
         let hidden = result
             .root
             .children
@@ -1813,9 +1990,7 @@ mod whole_volume_tests {
         std::os::unix::fs::symlink(data.join("part/linked"), twin.join("part/linked")).unwrap();
 
         let (seen, clones) = (Mutex::new(HashSet::new()), CloneBook::default());
-        let (errors, blocked_count, privacy_count) =
-            (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
-        let (blocked, skip) = (Mutex::new(Vec::new()), HashSet::new());
+        let (errors, refusals, skip) = (AtomicU64::new(0), Refusals::default(), HashSet::new());
         let walk = Walk {
             volume_total: 1 << 30,
             scan_root: &data,
@@ -1824,9 +1999,9 @@ mod whole_volume_tests {
             seen: &seen,
             clones: &clones,
             errors: &errors,
-            blocked_count: &blocked_count,
-            privacy_count: &privacy_count,
-            blocked: &blocked,
+            refusals: &refusals,
+            access: DiskAccess::Unknown,
+            me: effective_uid(),
             twin: Some((&data, &twin)),
         };
         let extra = walk.outside_twin().unwrap();
@@ -1885,10 +2060,51 @@ mod whole_volume_tests {
         let dir = temp_tree();
         let mut result = scan_inner(&dir, VolumeSpace::default(), &HashSet::new()).unwrap();
         let walked = result.root.size;
-        add_hidden_space(&mut result, walked / 2);
+        add_hidden_space(&mut result, walked / 2, walked / 2);
         fs::remove_dir_all(&dir).unwrap();
         assert_eq!(result.root.size, walked);
         assert_eq!(result.hidden, 0);
         assert!(result.root.children.iter().all(|c| c.name != HIDDEN_NAME));
+    }
+
+    #[test]
+    fn hidden_outside_never_exceeds_hidden_or_goes_negative() {
+        let dir = temp_tree();
+        let mut result = scan_inner(&dir, VolumeSpace::default(), &HashSet::new()).unwrap();
+        let walked = result.root.size;
+        // Used beyond on-disk larger than the gap itself: all of it is outside.
+        add_hidden_space(&mut result, walked + 1000, 0);
+        assert_eq!((result.hidden, result.hidden_outside), (1000, 1000));
+        let mut result = scan_inner(&dir, VolumeSpace::default(), &HashSet::new()).unwrap();
+        // More purgeable than other volumes: used is below on-disk.
+        add_hidden_space(&mut result, walked + 1000, walked + 5000);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!((result.hidden, result.hidden_outside), (1000, 0));
+    }
+
+    #[test]
+    fn refusals_name_what_could_open_them() {
+        let eacces = io::Error::from_raw_os_error(libc::EACCES);
+        let me = 501;
+        let kind = |owner| refusal_kind(&eacces, owner, me, DiskAccess::Granted);
+        assert_eq!(kind(Some(0)), Refusal::System, "root's folder");
+        assert_eq!(kind(Some(89)), Refusal::System, "a daemon account's folder");
+        assert_eq!(kind(Some(0xFFFF_FFFE)), Refusal::System, "nobody on macOS");
+        assert_eq!(
+            kind(Some(FIRST_USER_UID + 2)),
+            Refusal::Permissions,
+            "another user"
+        );
+        assert_eq!(kind(Some(me)), Refusal::Permissions, "own folder without r");
+        assert_eq!(kind(None), Refusal::Permissions, "owner unknown");
+        let eperm = io::Error::from_raw_os_error(libc::EPERM);
+        let by_access = |access| refusal_kind(&eperm, Some(me), me, access);
+        if cfg!(target_os = "macos") {
+            assert_eq!(by_access(DiskAccess::Denied), Refusal::Privacy);
+            assert_eq!(by_access(DiskAccess::Unknown), Refusal::Privacy);
+            assert_eq!(by_access(DiskAccess::Granted), Refusal::Protected);
+        } else {
+            assert_eq!(by_access(DiskAccess::Denied), Refusal::Permissions);
+        }
     }
 }
