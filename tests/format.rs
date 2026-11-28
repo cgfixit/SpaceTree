@@ -3,6 +3,13 @@
 use spacetree::format_bytes;
 
 #[test]
+fn volume_report_preserves_the_os_error_for_a_non_directory_component() {
+    let file = std::env::current_exe().unwrap();
+    let err = spacetree::try_format_volume(&file.join("child")).unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::ENOTDIR));
+}
+
+#[test]
 fn bytes_under_one_kilobyte_stay_exact() {
     assert_eq!(format_bytes(0), "0 B");
     assert_eq!(format_bytes(1), "1 B");

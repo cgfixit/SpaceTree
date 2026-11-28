@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::scan::{raw_available, volume_space};
+use crate::scan::{raw_available, try_volume_space, volume_space};
 use crate::{full_disk_access, DiskAccess, Node, ScanResult, HIDDEN_KEY};
 
 /// Stable text dump of a scan for the `--scan` CLI and tests.
@@ -58,8 +58,7 @@ pub fn format_volume(path: &Path) -> String {
 }
 
 pub fn try_format_volume(path: &Path) -> std::io::Result<String> {
-    std::fs::metadata(path)?;
-    let volume = volume_space(path);
+    let volume = try_volume_space(path)?;
     if volume.total == 0 {
         return Err(std::io::Error::other("volume capacity unavailable"));
     }
