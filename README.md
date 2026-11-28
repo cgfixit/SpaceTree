@@ -57,7 +57,7 @@ The **Volumes** button lists what is mounted: the startup disk, other disks (APF
 Ollama stores each model layer once as `~/.ollama/models/blobs/sha256-<hash>`, so the folder is a list of hashes with no model names. SpaceTree reads the manifests beside it and names the blobs. It only reads: nothing is run or deleted.
 
 - **In a scan** of the `blobs` folder or anything above it, each blob's row and tile shows the model and layer kind in front of the hash: `llama3:latest · model`, or `llama3:latest +1 · model` when two models share it. The tooltip lists every model that uses the blob. Blobs no model lists and unfinished downloads are labelled as such.
-- **`--ollama`** prints a report without a scan: each model with its blobs and sizes, shared blobs, allocation referenced exclusively by each model, unused blobs, unfinished downloads, models with a missing blob, and `ollama rm` commands ranked by exclusive allocation. Actual space reclaimed can differ. Incomplete manifest inventories suppress removal estimates and mark unmatched ownership unknown. Ollama itself removes unused blobs when its server starts, unless `OLLAMA_NOPRUNE` is set.
+- **`--ollama`** prints a report without a scan: each model with its blobs and sizes, shared blobs, allocation referenced exclusively by each model, unused blobs, unfinished downloads, models with a missing blob, and `ollama rm` commands ranked by exclusive allocation. Actual space reclaimed can differ. If a manifest is unreadable, invalid, or exceeds 4 MiB, the inventory is incomplete. SpaceTree suppresses removal estimates and marks unmatched ownership unknown. Ollama itself removes unused blobs when its server starts, unless `OLLAMA_NOPRUNE` is set.
 
 ## Command line
 
