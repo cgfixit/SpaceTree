@@ -407,7 +407,7 @@ fn unique_dir() -> PathBuf {
 }
 
 #[test]
-fn scan_skips_system_volumes_duplicate_data_tree() {
+fn ordinary_backup_includes_system_volumes() {
     let root = unique_dir();
     let _g = Fixture {
         root: root.clone(),
@@ -429,19 +429,8 @@ fn scan_skips_system_volumes_duplicate_data_tree() {
     assert!(dup_sz > 0);
 
     let result = scan(&root).unwrap();
-    assert_eq!(
-        result.root.size, keep_sz,
-        "System/Volumes/Data duplicate must not be added; got {} want {keep_sz} (dup was {dup_sz})",
-        result.root.size
-    );
+    assert_eq!(result.root.size, keep_sz + dup_sz);
     assert_eq!(child(&result.root, "Users").size, keep_sz);
-    if let Some(sys) = result.root.children.iter().find(|c| c.name == "System") {
-        let names = sibling_names(sys);
-        assert!(
-            !names.iter().any(|n| n == "Volumes"),
-            "System must not expose Volumes/Data: {names:?}"
-        );
-    }
 }
 
 #[cfg(target_os = "macos")]

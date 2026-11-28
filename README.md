@@ -22,24 +22,20 @@ Scanning `/` or another local macOS volume root adds what a folder scan does not
 
 - **Green figures.** The root row's Percentage cell is green and shows `~N% full`, and a green `Whole volume: ~N% free` line appears as soon as the scan starts. Folder scans show neither.
 - **They match System Settings › Storage.** macOS counts purgeable space (local snapshots, caches, files iCloud also holds) as available although it is still on disk. SpaceTree asks macOS for that Available figure, so used is capacity minus available, and the green line says how much of it is purgeable. The cell's tooltip gives the on-disk figure `df` prints. A volume macOS reports no purgeable space for uses the `df` figures.
-- **Hidden space.** One extra row holds used space the scan found in no file it could read. With it, the root row equals the used figure above. Hover it for its two parts:
+- **Hidden space.** One extra row holds used space the scan found in no file it could read. It fills a positive difference. If the walk already exceeds Used, the root retains the walked total. Hover it for its two parts:
   - *Outside this volume:* the other volumes of the same APFS container (VM swap, Preboot, Recovery, Update), less purgeable space. System Settings counts them as used, and no permission lets a scan into them. On a GitHub macOS runner this is about 9 GB of a 10.8 GB Hidden space. `--scan` prints it as `hidden_outside_bytes`.
   - *On this volume:* folders the scan could not open, snapshots, and file system metadata. Purgeable files the scan did read still count at full size in their folders, so this part can understate what is hidden.
-- **Refused folders.** A scan that could not read everything keeps a line in the status bar that says why each folder was refused. Hover it for the paths.
-  - *System-only:* folders a system account owns and keeps closed (on a GitHub macOS runner: `/private/var/spool/postfix/*`, `/usr/sbin/authserver`). Only root reads them, on every Mac, with or without Full Disk Access. When these are the only refusals the line is grey and says so.
-  - *Privacy-protected:* macOS privacy protection, while Full Disk Access is not in effect. Turning it on opens them.
-  - *Protected by macOS:* refused although Full Disk Access is in effect (System Integrity Protection, data vaults). No setting opens them.
-  - *File permissions:* another user's folders, or your own without read permission.
+- **Refused folders.** Counts cover every refusal. The tooltip shows up to 24 paths and the CLI lists up to 64. SpaceTree distinguishes ordinary permissions, system-owned folders and macOS refusals. Ownership and the Full Disk Access probe are clues. The specific cause may remain unknown.
 - **The Data volume.** `/` shows the Data volume only through its firmlinks (`/Users`, `/Applications`, …). A scan of `/` also walks what the Data volume keeps outside them and lists it as `System/Volumes/Data`, so readable files there are no longer part of Hidden space.
 - **One volume only.** The scan does not enter other mounts (`/Volumes/*`, mounted disk images), also when the root is reached through a symlink.
 
 ### Full Disk Access is on, but folders are still refused
 
-SpaceTree checks whether macOS actually lets it read privacy-protected files before each scan, and says so when it does not. The usual causes:
+SpaceTree checks whether macOS actually lets it read privacy-protected files when a scan encounters a macOS operation denial, and says so when it does not. The usual causes:
 
 - **The app was updated.** SpaceTree is ad-hoc signed, without an Apple Developer ID, so macOS cannot tell a new build from a different app, and a grant made for the old copy does not apply to the new one, although System Settings still shows SpaceTree as allowed. Remove SpaceTree from the Full Disk Access list with the − button, add the new copy with +, and scan again.
 - **You ran the command line.** For `spacetree --scan` started from Terminal, macOS checks the terminal app's grant, not SpaceTree's.
-- **The folders are system-only.** Full Disk Access does not make a user root. Folders a system account owns stay closed, and they are counted in Hidden space.
+- **The folders are system-only.** Full Disk Access does not make a user root. System-owned folders may still deny access through ordinary file permissions or an ACL.
 
 ## Disks, USB drives, and network shares
 
@@ -50,9 +46,9 @@ The **Volumes** button lists what is mounted: the startup disk, other disks (APF
 
 ## How sizes are measured
 
-- **Physical Size** is allocated bytes (`st_blocks * 512`); **Logical Size** is `st_size`. A folder is the sum of its children. Units are decimal, as in Finder (1 GB = 1,000,000,000 bytes).
+- **Physical Size** is allocated bytes (`st_blocks * 512`) for regular files. Symlinks use their link-text length; **Logical Size** is `st_size`. A folder is the sum of its children. Units are decimal, as in Finder (1 GB = 1,000,000,000 bytes).
 - **One system call per batch.** On macOS the scan lists each directory with `getattrlistbulk`, which returns names, sizes, dates, and APFS clone ids together, and walks subdirectories in parallel. On Linux, where the crate also builds and tests, it uses ordinary file metadata, without clone ids.
-- **APFS clones count once.** A pure clone (`cp -c`, Finder Duplicate) counts as zero after the first file seen. A clone later edited in part counts only the blocks it no longer shares, read from its physical extents. `du` counts every clone in full.
+- **APFS clones count once.** A pure clone (`cp -c`, Finder Duplicate) counts as zero after the first file seen. A clone later edited in part counts only the blocks it no longer shares, read from its physical extents when available. Unavailable extent maps fall back to full allocation. `du` counts every clone in full.
 - **No double counting.** A file with several hard links counts once. Child symlinks are not followed, and `/System/Volumes` is skipped unless it is the scan root, so the Data volume is not counted twice.
 - **Errors do not stop a scan.** An unreadable entry is counted and the rest is reported. Only an unreadable root fails.
 
@@ -73,8 +69,8 @@ cargo run -- --ollama                 # $OLLAMA_MODELS, or ~/.ollama/models
 cargo run -- --gui-scan /path         # open the app and scan
 ```
 
-- `--scan` prints header lines, starting with `volume_total_bytes` and `root_size_bytes`, then one indented line per node. A whole-volume scan adds `volume_used_bytes`, `hidden_bytes`, `hidden_outside_bytes`, `volume_on_disk_bytes`, and, when macOS reports purgeable space, `volume_available_bytes` and `volume_purgeable_bytes`. If entries could not be read it adds `scan_incomplete_errors`, lists the refused folders on stderr with the reason for each, and exits nonzero, also when every refusal is system-only.
-- `--volume` prints the same `volume_*` lines, then `full_disk_access=granted` or `denied` on macOS, then `macos_available_bytes[<mount>]`, the unfiltered answer from macOS. Use it to compare with System Settings. macOS refreshes these estimates on its own schedule, so expect close, not identical.
+- `--scan` prints header lines, starting with `volume_total_bytes` and `root_size_bytes`, then one indented line per node. A whole-volume scan adds `volume_used_bytes`, `hidden_bytes`, `hidden_outside_bytes`, `volume_on_disk_bytes`, and, when macOS reports purgeable space, `volume_available_bytes` and `volume_purgeable_bytes`. If entries could not be read it adds `scan_incomplete_errors`, lists up to 64 sample paths on stderr with their refusal classifications, and exits nonzero, also when every refusal is system-only.
+- `--volume` prints the same `volume_*` lines, then `full_disk_access=granted` or `denied` when the probe is conclusive on macOS, then `macos_available_bytes[<mount>]`, the unfiltered answer from macOS. Use it to compare with System Settings. macOS refreshes these estimates on its own schedule, so expect close, not identical.
 - `--volumes` prints one line per mounted volume: kind (`startup`, `local`, `network`), file system, free space, capacity, and mount point.
 
 ## Build and package
