@@ -1,26 +1,18 @@
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
-use spacetree::{layout_items, split_span, treemap_focus, LayoutItem, Node, PxRect};
+use spacetree::{layout_node, split_span, treemap_focus, Node, PxRect, Tiling};
 
-fn item(name: &str, weight: u64) -> LayoutItem {
-    LayoutItem {
-        path: PathBuf::from(name),
-        weight,
-        color_ext: String::new(),
-        merged: false,
-        children: Vec::new(),
-    }
+fn item(path: &str, weight: u64) -> Node {
+    tree_node(path, weight, false, Vec::new())
 }
 
-fn dir(name: &str, weight: u64, children: Vec<LayoutItem>) -> LayoutItem {
-    LayoutItem {
-        path: PathBuf::from(name),
-        weight,
-        color_ext: String::new(),
-        merged: false,
-        children,
-    }
+fn dir(path: &str, weight: u64, children: Vec<Node>) -> Node {
+    tree_node(path, weight, true, children)
+}
+
+fn layout(children: Vec<Node>, bounds: PxRect) -> Tiling {
+    let weight = children.iter().map(|child| child.size).sum();
+    layout_node(&dir("/scan", weight, children), bounds)
 }
 
 fn rect(x: i32, y: i32, w: u32, h: u32) -> PxRect {
@@ -68,7 +60,7 @@ fn two_equal_files_split_a_wide_rect_and_ignore_input_order() {
         vec![item("b", 1), item("a", 1)],
         vec![item("a", 1), item("b", 1)],
     ] {
-        let tiling = layout_items(&input, bounds);
+        let tiling = layout(input, bounds);
         assert_eq!(*tile(&tiling, "a"), rect(0, 0, 5, 4));
         assert_eq!(*tile(&tiling, "b"), rect(5, 0, 5, 4));
         assert_eq!(tiling.hit(5, 0).unwrap(), std::path::Path::new("b"));
@@ -79,8 +71,8 @@ fn two_equal_files_split_a_wide_rect_and_ignore_input_order() {
 
 #[test]
 fn three_equal_files_match_the_worked_wide_layout() {
-    let tiling = layout_items(
-        &[item("c", 1), item("a", 1), item("b", 1)],
+    let tiling = layout(
+        vec![item("c", 1), item("a", 1), item("b", 1)],
         rect(0, 0, 10, 6),
     );
     assert_eq!(*tile(&tiling, "a"), rect(0, 0, 6, 3));
@@ -91,16 +83,16 @@ fn three_equal_files_match_the_worked_wide_layout() {
 
 #[test]
 fn zero_weight_sibling_gets_no_tile() {
-    let tiling = layout_items(&[item("gone", 0), item("keep", 5)], rect(0, 0, 8, 3));
+    let tiling = layout(vec![item("gone", 0), item("keep", 5)], rect(0, 0, 8, 4));
     assert_eq!(tiling.tiles().len(), 1);
-    assert_eq!(*tile(&tiling, "keep"), rect(0, 0, 8, 3));
-    assert_partition(&tiling, 8, 3);
+    assert_eq!(*tile(&tiling, "keep"), rect(0, 0, 8, 4));
+    assert_partition(&tiling, 8, 4);
 }
 
 #[test]
 fn directories_are_frames_not_tiles() {
-    let tiling = layout_items(
-        &[
+    let tiling = layout(
+        vec![
             dir("left", 1, vec![item("a", 1)]),
             dir("right", 1, vec![item("b", 1)]),
         ],
@@ -115,7 +107,7 @@ fn directories_are_frames_not_tiles() {
         .all(|t| t.path.as_path() != Path::new("left")));
 }
 
-fn tree_node(path: &str, is_dir: bool, children: Vec<Node>) -> Node {
+fn tree_node(path: &str, weight: u64, is_dir: bool, children: Vec<Node>) -> Node {
     Node {
         name: Path::new(path)
             .file_name()
@@ -123,11 +115,15 @@ fn tree_node(path: &str, is_dir: bool, children: Vec<Node>) -> Node {
             .unwrap_or_else(|| path.to_string()),
         path: PathBuf::from(path),
         is_dir,
-        size: 1,
-        logical: 1,
-        files: if is_dir { 0 } else { 1 },
+        size: weight,
+        logical: weight,
+        files: if is_dir {
+            children.iter().map(|child| child.files).sum()
+        } else {
+            1
+        },
         color_ext: "txt".to_string(),
-        modified: None::<SystemTime>,
+        modified: None,
         created: None,
         percent_of_disk: 0.0,
         children,
@@ -136,8 +132,8 @@ fn tree_node(path: &str, is_dir: bool, children: Vec<Node>) -> Node {
 
 #[test]
 fn file_selection_focuses_the_parent_directory() {
-    let file = tree_node("/scan/a.txt", false, Vec::new());
-    let root = tree_node("/scan", true, vec![file]);
+    let file = item("/scan/a.txt", 1);
+    let root = dir("/scan", 1, vec![file]);
     assert_eq!(
         treemap_focus(&root, Some(Path::new("/scan/a.txt"))).path,
         Path::new("/scan")
@@ -151,8 +147,8 @@ fn file_selection_focuses_the_parent_directory() {
 
 #[test]
 fn directories_record_nested_frames_around_their_tiles() {
-    let tiling = layout_items(
-        &[
+    let tiling = layout(
+        vec![
             dir(
                 "left",
                 2,
@@ -192,7 +188,7 @@ fn directories_record_nested_frames_around_their_tiles() {
 
 #[test]
 fn tiles_carry_their_weight_and_a_merged_tile_carries_the_sum() {
-    let tiling = layout_items(&[item("big", 7), item("small", 3)], rect(0, 0, 10, 4));
+    let tiling = layout(vec![item("big", 7), item("small", 3)], rect(0, 0, 10, 4));
     let weight = |name: &str| {
         tiling
             .tiles()
@@ -208,11 +204,11 @@ fn tiles_carry_their_weight_and_a_merged_tile_carries_the_sum() {
     );
 
     // 32x32 px allows 64 tiles; 100 files leave 37 in one merged tile.
-    let many: Vec<LayoutItem> = (0..100)
+    let many: Vec<Node> = (0..100)
         .map(|i| item(&format!("f{i:03}"), 1000 - i as u64))
         .collect();
-    let total: u64 = many.iter().map(|i| i.weight).sum();
-    let tiling = layout_items(&many, rect(0, 0, 32, 32));
+    let total: u64 = many.iter().map(|i| i.size).sum();
+    let tiling = layout(many, rect(0, 0, 32, 32));
     let merged: Vec<_> = tiling.tiles().iter().filter(|t| t.merged).collect();
     assert_eq!(merged.len(), 1);
     let placed: u64 = tiling.tiles().iter().map(|t| t.weight).sum();

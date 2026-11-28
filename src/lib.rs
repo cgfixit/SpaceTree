@@ -19,9 +19,7 @@ pub use format::{
     format_bytes, format_refusals, format_scan, format_scan_to_depth, format_volume,
     try_format_volume,
 };
-pub use layout::{
-    layout_items, layout_node, split_span, treemap_focus, Frame, LayoutItem, PxRect, Tile, Tiling,
-};
+pub use layout::{layout_node, split_span, treemap_focus, Frame, PxRect, Tile, Tiling};
 pub use ollama::{
     blob_notes, default_models_dir, format_ollama, ollama_report, BlobNote, BlobUse, OllamaLayer,
     OllamaModel, OllamaStore,
