@@ -365,10 +365,10 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
         if followed.is_dir() {
             walk.dir(path, &followed)?.0
         } else {
-            leaf(path, &lmeta, volume_total, &clones).0
+            leaf(path, &lmeta, volume_total, &clones)
         }
     } else {
-        leaf(path, &lmeta, volume_total, &clones).0
+        leaf(path, &lmeta, volume_total, &clones)
     };
     // The boot volume is two volumes: `/` shows the Data volume only through
     // firmlinks (/Users, /Applications, ...). What the Data volume holds
@@ -855,12 +855,7 @@ fn allocated_bytes(meta: &Metadata) -> u64 {
     }
 }
 
-fn leaf(
-    path: &Path,
-    meta: &Metadata,
-    volume_total: u64,
-    clones: &CloneBook,
-) -> (Node, BTreeMap<String, ExtSum>) {
+fn leaf(path: &Path, meta: &Metadata, volume_total: u64, clones: &CloneBook) -> Node {
     let mut size = allocated_bytes(meta);
     if !meta.file_type().is_symlink() {
         if let Some(id) = apfs_clone_id(path) {
@@ -871,30 +866,19 @@ fn leaf(
     }
     let name = node_name(path);
     let color_ext = ext_key(&name);
-    let mut by_ext = BTreeMap::new();
-    by_ext.insert(
-        color_ext.clone(),
-        ExtSum {
-            physical: size,
-            files: 1,
-        },
-    );
-    (
-        Node {
-            name,
-            path: path.to_path_buf(),
-            is_dir: false,
-            size,
-            logical: meta.len(),
-            files: 1,
-            color_ext,
-            modified: meta.modified().ok(),
-            created: meta.created().ok(),
-            percent_of_disk: percent_of_disk(size, volume_total),
-            children: Vec::new(),
-        },
-        by_ext,
-    )
+    Node {
+        name,
+        path: path.to_path_buf(),
+        is_dir: false,
+        size,
+        logical: meta.len(),
+        files: 1,
+        color_ext,
+        modified: meta.modified().ok(),
+        created: meta.created().ok(),
+        percent_of_disk: percent_of_disk(size, volume_total),
+        children: Vec::new(),
+    }
 }
 
 fn is_hidden_data_mount(scan_root: &Path, path: &Path) -> bool {
@@ -1726,20 +1710,11 @@ fn merge_ext(into: &mut BTreeMap<String, ExtSum>, from: BTreeMap<String, ExtSum>
 }
 
 fn dominant_ext(totals: &BTreeMap<String, ExtSum>) -> String {
-    let mut best: Option<(&str, u64, u64)> = None;
-    for (key, sum) in totals {
-        let take = match best {
-            None => true,
-            Some((best_key, physical, files)) => {
-                (sum.physical, sum.files, std::cmp::Reverse(key.as_str()))
-                    > (physical, files, std::cmp::Reverse(best_key))
-            }
-        };
-        if take {
-            best = Some((key.as_str(), sum.physical, sum.files));
-        }
-    }
-    best.map(|(key, _, _)| key.to_string()).unwrap_or_default()
+    totals
+        .iter()
+        .max_by_key(|(key, sum)| (sum.physical, sum.files, std::cmp::Reverse(key.as_str())))
+        .map(|(key, _)| key.clone())
+        .unwrap_or_default()
 }
 
 #[cfg(all(test, target_os = "macos"))]
