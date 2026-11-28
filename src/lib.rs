@@ -20,8 +20,8 @@ pub use layout::{
     layout_items, layout_node, split_span, treemap_focus, Frame, LayoutItem, PxRect, Tile, Tiling,
 };
 pub use ollama::{
-    blob_notes, default_models_dir, format_ollama, BlobNote, BlobUse, OllamaLayer, OllamaModel,
-    OllamaStore,
+    blob_notes, default_models_dir, format_ollama, ollama_report, BlobNote, BlobUse, OllamaLayer,
+    OllamaModel, OllamaStore,
 };
 pub use scan::{
     full_disk_access, scan, Blocked, DiskAccess, Node, Refusal, ScanResult, BLOCKED_SAMPLE,

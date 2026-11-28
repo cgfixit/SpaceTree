@@ -56,9 +56,14 @@ fn main() {
         };
         let report = dir
             .ok_or_else(|| "no models directory: set OLLAMA_MODELS or pass a path".to_string())
-            .and_then(|dir| spacetree::format_ollama(&dir));
+            .and_then(|dir| spacetree::ollama_report(&dir));
         match report {
-            Ok(text) => print!("{text}"),
+            Ok((text, complete)) => {
+                print!("{text}");
+                if !complete {
+                    std::process::exit(1);
+                }
+            }
             Err(e) => {
                 eprintln!("ollama report failed: {e}");
                 std::process::exit(1);

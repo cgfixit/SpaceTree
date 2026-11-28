@@ -62,10 +62,12 @@ impl OllamaStore {
             return None;
         }
         let mut files = Vec::new();
-        manifest_files(&manifests, 0, &mut files);
+        let mut unreadable = Vec::new();
+        manifest_files(&manifests, 0, &mut files, &mut unreadable);
         files.sort();
         let mut store = OllamaStore {
             dir: dir.to_path_buf(),
+            unreadable,
             ..Default::default()
         };
         for file in files {
@@ -134,12 +136,19 @@ fn blob_note(store: &OllamaStore, blob: &str) -> BlobNote {
             format!("Ollama blob shared by {} models:", uses.len())
         }];
         detail.extend(uses.iter().map(|u| format!("  {} ({})", u.model, u.kind)));
-        if uses.len() > 1 {
+        if !store.unreadable.is_empty() {
+            detail.push("Inventory incomplete; additional models may reference this blob.".into());
+        } else if uses.len() > 1 {
             detail.push("It stays until every one of them is removed".to_string());
         } else if let Some(command) = remove_command(&first.model) {
             detail.push(format!("`{command}` removes it"));
         }
         BlobNote { label, detail }
+    } else if !store.unreadable.is_empty() && !is_partial(blob) {
+        BlobNote {
+            label: "Ollama · ownership unknown".into(),
+            detail: vec!["Some manifests could not be read.".into()],
+        }
     } else if is_partial(blob) {
         BlobNote {
             label: "Ollama · unfinished download".into(),
@@ -221,22 +230,26 @@ pub fn default_models_dir() -> Option<PathBuf> {
 /// Text report of a `models` directory for the `--ollama` CLI: each model
 /// with its blobs, then what no model uses. `Err` when `dir` is not a store.
 pub fn format_ollama(dir: &Path) -> Result<String, String> {
+    ollama_report(dir).map(|(text, _)| text)
+}
+
+pub fn ollama_report(dir: &Path) -> Result<(String, bool), String> {
     let store = OllamaStore::load(dir)
         .ok_or_else(|| format!("{}: no manifests directory", dir.display()))?;
     // Allocated bytes of each file in blobs/, as the scan counts them.
     let mut sizes: BTreeMap<String, u64> = BTreeMap::new();
-    if let Ok(entries) = fs::read_dir(dir.join("blobs")) {
-        for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                if meta.is_file() {
-                    sizes.insert(
-                        entry.file_name().to_string_lossy().into_owned(),
-                        meta.blocks().saturating_mul(512),
-                    );
-                }
-            }
+    let io_error = |e: std::io::Error| format!("could not read blob inventory: {e}");
+    for entry in fs::read_dir(dir.join("blobs")).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let meta = entry.metadata().map_err(io_error)?;
+        if meta.is_file() {
+            sizes.insert(
+                entry.file_name().to_string_lossy().into_owned(),
+                meta.blocks().saturating_mul(512),
+            );
         }
     }
+    let complete = store.unreadable.is_empty();
     let size_of = |blob: &str| sizes.get(blob).copied();
     let short = |blob: &str| blob.chars().take(19).collect::<String>();
     let mut out = format!("ollama_models_dir={}\n", dir.display());
@@ -256,13 +269,21 @@ pub fn format_ollama(dir: &Path) -> Result<String, String> {
             .filter(|b| store.uses(b).iter().all(|u| u.model == model.name))
             .filter_map(|b| size_of(b))
             .sum();
-        removable.push((own, model.name.as_str()));
-        out.push_str(&format!(
-            "{}  {}  ({} freed by removing it alone)\n",
-            model.name,
-            format_bytes(total),
-            format_bytes(own)
-        ));
+        if complete {
+            removable.push((own, model.name.as_str()));
+            out.push_str(&format!(
+                "{}  {}  ({} exclusively referenced allocation)\n",
+                model.name,
+                format_bytes(total),
+                format_bytes(own)
+            ));
+        } else {
+            out.push_str(&format!(
+                "{}  {}  (inventory incomplete)\n",
+                model.name,
+                format_bytes(total)
+            ));
+        }
         let mut seen = BTreeSet::new();
         for layer in &model.layers {
             if !seen.insert(layer.blob.as_str()) {
@@ -300,7 +321,14 @@ pub fn format_ollama(dir: &Path) -> Result<String, String> {
         .collect();
     let (partial, orphan): (Vec<_>, Vec<_>) = unused.into_iter().partition(|(b, _)| is_partial(b));
     for (title, list) in [
-        ("Blobs no model uses", &orphan),
+        (
+            if complete {
+                "Blobs no model uses"
+            } else {
+                "Blobs with unknown ownership"
+            },
+            &orphan,
+        ),
         ("Unfinished downloads", &partial),
     ] {
         if list.is_empty() {
@@ -319,7 +347,7 @@ pub fn format_ollama(dir: &Path) -> Result<String, String> {
             out.push_str(&format!("  {:>9}  {}\n", format_bytes(**size), blob));
         }
     }
-    if !orphan.is_empty() || !partial.is_empty() {
+    if complete && (!orphan.is_empty() || !partial.is_empty()) {
         out.push_str(
             "Ollama removes blobs no model uses when its server starts, unless OLLAMA_NOPRUNE is set.\n",
         );
@@ -337,32 +365,43 @@ pub fn format_ollama(dir: &Path) -> Result<String, String> {
         ));
     }
     for file in &store.unreadable {
-        out.push_str(&format!("\nNot a readable manifest: {}\n", file.display()));
+        out.push_str(&format!(
+            "\nIncomplete manifest inventory at: {}\n",
+            file.display()
+        ));
     }
     removable.sort_by(|a, b| b.cmp(a));
     if !removable.is_empty() {
-        out.push_str("\nLargest first, by what removing each one alone frees:\n");
+        out.push_str("\nLargest first, by exclusively referenced allocation (actual space reclaimed may differ):\n");
         for (own, name) in removable {
             let command = remove_command(name)
                 .unwrap_or_else(|| format!("{name:?} (unusual name: remove it by hand)"));
             out.push_str(&format!("  {:>9}  {command}\n", format_bytes(own)));
         }
     }
-    Ok(out)
+    Ok((out, complete))
 }
 
 /// Manifest files sit four levels down: host, namespace, model, tag.
-fn manifest_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+fn manifest_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, unreadable: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
+        unreadable.push(dir.to_owned());
         return;
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let Ok(entry) = entry else {
+            unreadable.push(dir.to_owned());
+            continue;
+        };
         let path = entry.path();
         let Ok(kind) = entry.file_type() else {
+            unreadable.push(path);
             continue;
         };
         if kind.is_dir() && depth < 8 {
-            manifest_files(&path, depth + 1, out);
+            manifest_files(&path, depth + 1, out, unreadable);
+        } else if kind.is_dir() || kind.is_symlink() {
+            unreadable.push(path);
         } else if kind.is_file() && !entry.file_name().to_string_lossy().starts_with('.') {
             out.push(path);
         }
@@ -393,198 +432,44 @@ fn model_name(manifests: &Path, file: &Path) -> String {
 
 /// The config and layers of a manifest, or `None` when the text is not one.
 fn manifest_layers(text: &str) -> Option<Vec<OllamaLayer>> {
-    let Json::Object(top) = Json::parse(text)? else {
+    let top: serde_json::Value = serde_json::from_str(text).ok()?;
+    fn within_limit(value: &serde_json::Value, depth: usize) -> bool {
+        depth <= 32
+            && match value {
+                serde_json::Value::Array(a) => a.iter().all(|v| within_limit(v, depth + 1)),
+                serde_json::Value::Object(o) => o.values().all(|v| within_limit(v, depth + 1)),
+                _ => true,
+            }
+    }
+    if !within_limit(&top, 0) {
         return None;
-    };
-    let field = |name: &str| top.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+    }
     let mut out = Vec::new();
-    let mut push = |value: &Json, fallback: &str| {
-        let Json::Object(fields) = value else {
-            return;
-        };
-        let text = |name: &str| {
-            fields.iter().find_map(|(k, v)| match v {
-                Json::String(s) if k == name => Some(s.as_str()),
-                _ => None,
-            })
-        };
-        let Some(hex) = text("digest").and_then(|d| d.strip_prefix("sha256:")) else {
-            return;
-        };
+    let mut push = |value: &serde_json::Value, fallback: &str| -> Option<()> {
+        let hex = value.get("digest")?.as_str()?.strip_prefix("sha256:")?;
         if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return;
+            return None;
         }
-        // `application/vnd.ollama.image.model` is a `model` layer.
-        let kind = text("mediaType")
-            .and_then(|m| m.strip_prefix("application/vnd.ollama.image."))
+        let kind = value
+            .get("mediaType")
+            .and_then(|v| v.as_str())
+            .and_then(|v| v.strip_prefix("application/vnd.ollama.image."))
             .unwrap_or(fallback);
         out.push(OllamaLayer {
             blob: format!("sha256-{hex}"),
-            kind: kind.to_string(),
+            kind: kind.to_owned(),
         });
+        Some(())
     };
-    if let Some(Json::Array(layers)) = field("layers") {
-        for layer in layers {
-            push(layer, "layer");
+    if let Some(layers) = top.get("layers") {
+        for layer in layers.as_array()? {
+            push(layer, "layer")?;
         }
     }
-    if let Some(config) = field("config") {
-        push(config, "config");
+    if let Some(config) = top.get("config") {
+        push(config, "config")?;
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
-}
-
-/// The subset of JSON a manifest needs, kept in document order.
-enum Json {
-    Null,
-    Bool,
-    Number,
-    String(String),
-    Array(Vec<Json>),
-    Object(Vec<(String, Json)>),
-}
-
-impl Json {
-    fn parse(text: &str) -> Option<Json> {
-        let mut reader = Reader {
-            bytes: text.as_bytes(),
-            at: 0,
-        };
-        let value = reader.value(0)?;
-        reader.space();
-        (reader.at == reader.bytes.len()).then_some(value)
-    }
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-
-impl Reader<'_> {
-    fn space(&mut self) {
-        while matches!(self.bytes.get(self.at), Some(b' ' | b'\n' | b'\r' | b'\t')) {
-            self.at += 1;
-        }
-    }
-
-    fn eat(&mut self, byte: u8) -> bool {
-        self.space();
-        let hit = self.bytes.get(self.at) == Some(&byte);
-        if hit {
-            self.at += 1;
-        }
-        hit
-    }
-
-    fn word(&mut self, word: &str, value: Json) -> Option<Json> {
-        let end = self.at.checked_add(word.len())?;
-        (self.bytes.get(self.at..end)? == word.as_bytes()).then(|| {
-            self.at = end;
-            value
-        })
-    }
-
-    fn value(&mut self, depth: usize) -> Option<Json> {
-        if depth > 32 {
-            return None;
-        }
-        self.space();
-        match *self.bytes.get(self.at)? {
-            b'{' => {
-                self.at += 1;
-                let mut fields = Vec::new();
-                if self.eat(b'}') {
-                    return Some(Json::Object(fields));
-                }
-                loop {
-                    self.space();
-                    let key = self.string()?;
-                    if !self.eat(b':') {
-                        return None;
-                    }
-                    fields.push((key, self.value(depth + 1)?));
-                    if self.eat(b'}') {
-                        return Some(Json::Object(fields));
-                    }
-                    if !self.eat(b',') {
-                        return None;
-                    }
-                }
-            }
-            b'[' => {
-                self.at += 1;
-                let mut items = Vec::new();
-                if self.eat(b']') {
-                    return Some(Json::Array(items));
-                }
-                loop {
-                    items.push(self.value(depth + 1)?);
-                    if self.eat(b']') {
-                        return Some(Json::Array(items));
-                    }
-                    if !self.eat(b',') {
-                        return None;
-                    }
-                }
-            }
-            b'"' => self.string().map(Json::String),
-            b't' => self.word("true", Json::Bool),
-            b'f' => self.word("false", Json::Bool),
-            b'n' => self.word("null", Json::Null),
-            b'-' | b'0'..=b'9' => {
-                while matches!(
-                    self.bytes.get(self.at),
-                    Some(b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
-                ) {
-                    self.at += 1;
-                }
-                Some(Json::Number)
-            }
-            _ => None,
-        }
-    }
-
-    fn string(&mut self) -> Option<String> {
-        if self.bytes.get(self.at) != Some(&b'"') {
-            return None;
-        }
-        self.at += 1;
-        let mut out = Vec::new();
-        loop {
-            let byte = *self.bytes.get(self.at)?;
-            self.at += 1;
-            match byte {
-                b'"' => return String::from_utf8(out).ok(),
-                b'\\' => {
-                    let escape = *self.bytes.get(self.at)?;
-                    self.at += 1;
-                    match escape {
-                        b'n' => out.push(b'\n'),
-                        b't' => out.push(b'\t'),
-                        b'r' => out.push(b'\r'),
-                        b'b' => out.push(8),
-                        b'f' => out.push(12),
-                        b'u' => {
-                            let hex = self.bytes.get(self.at..self.at.checked_add(4)?)?;
-                            let code =
-                                u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
-                            self.at += 4;
-                            // A lone surrogate half has no char; keep a marker.
-                            let c = char::from_u32(code).unwrap_or('\u{fffd}');
-                            out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
-                        }
-                        other => out.push(other),
-                    }
-                }
-                other => out.push(other),
-            }
-        }
-    }
+    (!out.is_empty()).then_some(out)
 }
 
 #[cfg(test)]
@@ -596,8 +481,7 @@ mod tests {
       "config":{"mediaType":"application/vnd.docker.container.image.v1+json","digest":"sha256:c0ffee","size":485},
       "layers":[
         {"mediaType":"application/vnd.ollama.image.model","digest":"sha256:ab12","size":4661211808},
-        {"mediaType":"application/vnd.ollama.image.template","digest":"sha256:cd34","size":254},
-        {"mediaType":"application/vnd.ollama.image.params","digest":"not-a-digest","size":1}]}"#;
+        {"mediaType":"application/vnd.ollama.image.template","digest":"sha256:cd34","size":254}]}"#;
 
     #[test]
     fn a_manifest_lists_its_layers_then_its_config() {
@@ -659,7 +543,7 @@ mod tests {
         );
         assert_eq!(
             blob_note(&store, "sha256-ffff").label,
-            "Ollama · no model uses this"
+            "Ollama · ownership unknown"
         );
         assert_eq!(
             blob_note(&store, "sha256-ffff-partial-0").label,
@@ -672,7 +556,11 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
         assert!(report.contains("shared with tuned:v1"), "{report}");
         assert!(report.contains("MISSING"), "{report}");
-        assert!(report.contains("Blobs no model uses: 1 files"), "{report}");
+        assert!(
+            report.contains("Blobs with unknown ownership: 1 files"),
+            "{report}"
+        );
+        assert!(!report.contains("ollama rm "));
         assert!(format_ollama(Path::new("/nonexistent-spacetree")).is_err());
         assert_eq!(
             remove_command("hf.co/org/repo:Q4_K_M").as_deref(),
