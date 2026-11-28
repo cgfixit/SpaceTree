@@ -10,7 +10,7 @@ More captures are in [`screenshots/`](screenshots/). They use a synthetic tree, 
 
 ## The window
 
-- **Table.** Columns are Name, Size Proportion, Percentage, Physical Size, Logical Size, and Files; click a header to sort. Use the disclosure arrow to expand a folder and its name to select or zoom. Percentage is a row's allocated bytes divided by the scan root. Hover a size for the exact byte count.
+- **Table.** Columns are Name, Size Proportion, Percentage, Physical Size, Logical Size, and Files; click a header to sort. Use the disclosure arrow to expand a folder and its name to select or zoom. Percentage is a row's allocated bytes divided by the scan root. Hover a size for the exact byte count. On macOS, SpaceTree can use the installed Arial Unicode font for filenames the default fonts cannot display.
 - **Treemap.** Files with allocated bytes appear as tiles. Dense views group small items under a non-actionable Other tile. Area is allocated size and color is the file extension. Folders are outlined, and large folders and files carry a name and size. Hover a tile for its size, kind, and share of the view and of the scan.
 - **Legend.** The extension colors in the scan, each with its size and share. Hover a row to highlight that extension in the map.
 - **Navigation.** A single click selects, and selecting a folder in the table outlines it in the map. Double-click a folder or its label to zoom in; double-click a file to reveal it in Finder. The bar above the map shows where you are: click any part of it to jump back, or press Esc or Zoom out to go up one level.
