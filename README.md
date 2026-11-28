@@ -50,7 +50,7 @@ The **Volumes** button lists what is mounted: the startup disk, other disks (APF
 - **One system call per batch.** On macOS the scan lists each directory with `getattrlistbulk`, which returns names, sizes, dates, and APFS clone ids together, and walks subdirectories in parallel. On Linux, where the crate also builds and tests, it uses ordinary file metadata, without clone ids.
 - **APFS clones count once.** A pure clone (`cp -c`, Finder Duplicate) counts as zero after the first file seen. A clone later edited in part counts only the blocks it no longer shares, read from its physical extents when available. Unavailable extent maps fall back to full allocation. `du` counts every clone in full.
 - **No double counting.** A file with several hard links counts once. Child symlinks are not followed, and `/System/Volumes` is skipped unless it is the scan root, so the Data volume is not counted twice.
-- **Errors do not stop a scan.** An unreadable entry is counted and the rest is reported. Only an unreadable root fails.
+- **Errors do not stop a scan.** An unreadable entry is counted and the rest is reported. An unreadable scan root fails the scan. A whole-volume scan also stops if macOS cannot list the mounts it must exclude.
 
 ## Ollama models
 
@@ -72,7 +72,7 @@ cargo run -- --gui-scan /path         # open the app and scan
 ```
 
 - `--scan` prints header lines, starting with `volume_total_bytes` and `root_size_bytes`, then one indented line per node. A whole-volume scan adds `volume_used_bytes`, `hidden_bytes`, `hidden_outside_bytes`, `volume_on_disk_bytes`, and, when macOS reports purgeable space, `volume_available_bytes` and `volume_purgeable_bytes`. If entries could not be read it adds `scan_incomplete_errors`, lists up to 64 sample paths on stderr with their refusal classifications, and exits nonzero, also when every refusal is system-only.
-- `--volume` prints the same `volume_*` lines, then `full_disk_access=granted` or `denied` when the probe is conclusive on macOS, then `macos_available_bytes[<mount>]`, the unfiltered answer from macOS. Use it to compare with System Settings. macOS refreshes these estimates on its own schedule, so expect close, not identical.
+- `--volume` prints the same `volume_*` lines, then `full_disk_access=granted` or `denied` when the probe is conclusive on macOS, then `macos_available_bytes[<mount>]`, the unfiltered answer from macOS. If the filesystem lookup fails, the command exits nonzero and reports the operating system error. Use it to compare with System Settings. macOS refreshes these estimates on its own schedule, so expect close, not identical.
 - `--volumes` prints one line per mounted volume: kind (`startup`, `local`, `network`), file system, free space, capacity, and mount point.
 
 ## Build and package

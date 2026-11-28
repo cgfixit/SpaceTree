@@ -565,16 +565,18 @@ fn known_available(raw: Option<u64>, free: u64, total: u64) -> Option<u64> {
 }
 
 pub(crate) fn volume_space(path: &Path) -> VolumeSpace {
+    try_volume_space(path).unwrap_or_default()
+}
+
+pub(crate) fn try_volume_space(path: &Path) -> io::Result<VolumeSpace> {
     #[cfg(target_os = "macos")]
     {
-        let Some(s) = statfs_of(path) else {
-            return VolumeSpace::default();
-        };
+        let s = statfs_of(path)?;
         // The boot volume group: `/` is the sealed System volume, and the
         // firmlinks under it (/Users, /Applications, ...) lead into the Data
         // volume. Macintosh HD's used space counts both.
         let data = (mount_path(&s) == Path::new("/"))
-            .then(|| statfs_of(Path::new("/System/Volumes/Data")))
+            .then(|| statfs_of(Path::new("/System/Volumes/Data")).ok())
             .flatten()
             .filter(|d| mount_path(d) == Path::new("/System/Volumes/Data"));
         let total = s.f_blocks.saturating_mul(u64::from(s.f_bsize));
@@ -587,43 +589,40 @@ pub(crate) fn volume_space(path: &Path) -> VolumeSpace {
         // Asked only for volume roots: the answer comes from a system
         // service, and a folder scan shows no volume figures.
         let raw = root_used.and_then(|_| important_available(&mount_path(&s)));
-        VolumeSpace {
+        Ok(VolumeSpace {
             total,
             free,
             available: known_available(raw, free, total),
             root_used,
-        }
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let c = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
-            Ok(c) => c,
-            Err(_) => return VolumeSpace::default(),
-        };
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes())?;
         // SAFETY: `c` is a NUL-terminated path; `s` is a valid statvfs out-param.
         let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
-            return VolumeSpace::default();
+            return Err(io::Error::last_os_error());
         }
-        VolumeSpace {
+        Ok(VolumeSpace {
             total: (s.f_blocks as u64).saturating_mul(s.f_frsize as u64),
             free: (s.f_bavail as u64).saturating_mul(s.f_frsize as u64),
             available: None,
             root_used: None,
-        }
+        })
     }
 }
 
 #[cfg(target_os = "macos")]
-fn statfs_of(path: &Path) -> Option<libc::statfs> {
-    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+fn statfs_of(path: &Path) -> io::Result<libc::statfs> {
+    let c = CString::new(path.as_os_str().as_bytes())?;
     // SAFETY: all fields of statfs accept zero; statfs fills it.
     let mut s: libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: `c` is a NUL-terminated path; `s` is a valid statfs out-param.
     if unsafe { libc::statfs(c.as_ptr(), &mut s) } != 0 {
-        return None;
+        return Err(io::Error::last_os_error());
     }
-    Some(s)
+    Ok(s)
 }
 
 /// Bytes allocated to this volume alone, as `df` shows in its Used column.
@@ -788,7 +787,7 @@ pub(crate) fn important_available(mount: &Path) -> Option<u64> {
 pub(crate) fn raw_available(path: &Path) -> Vec<(PathBuf, Option<u64>)> {
     #[cfg(target_os = "macos")]
     {
-        let Some(s) = statfs_of(path) else {
+        let Ok(s) = statfs_of(path) else {
             return Vec::new();
         };
         let mut mounts = vec![mount_path(&s)];
