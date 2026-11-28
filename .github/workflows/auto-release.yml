@@ -133,7 +133,7 @@ jobs:
             hold "no successful push bundle run for $short."
           fi
 
-          say "Releasing $short as $tag from bundle run $bundle_run."
+          say "Selected $short for $tag from bundle run $bundle_run."
           {
             echo "release=true"
             echo "sha=$sha"
@@ -227,6 +227,11 @@ jobs:
                 -f target_commitish="$SHA" --jq .body
             fi
           } > "$notes"
+          head="$(gh api "repos/$repo/commits/main" --jq .sha)"
+          if [ "$head" != "$SHA" ]; then
+            echo "Skipped $TAG because main moved past $short." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           gh release create "$TAG" "$asset" \
             --repo "$repo" \
             --target "$SHA" \
