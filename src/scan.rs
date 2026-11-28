@@ -444,7 +444,8 @@ fn add_hidden_space(result: &mut ScanResult, used: u64, on_disk: u64) {
     result.hidden_outside = used.saturating_sub(on_disk).min(hidden);
     root.children.push(Node {
         name: HIDDEN_NAME.to_string(),
-        path: root.path.join(HIDDEN_NAME),
+        // A NUL component cannot collide with a real filesystem entry.
+        path: root.path.join("\0hidden"),
         is_dir: false,
         size: hidden,
         logical: 0,
