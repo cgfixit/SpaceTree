@@ -2,7 +2,7 @@
 
 `before-treemap-main.png` shows an earlier treemap (unlabeled tiles, binary sizes labeled MB).
 
-The other PNGs are renders of the current UI on a synthetic tree (`/Users/demo/Synthetic`, about 110 MB in 520 generated files). They are egui renders under Xvfb on Linux with XTest pointer input, not native macOS captures. The title bar, traffic lights and drop shadow are a mock-up added by `scripts/frame-screenshots.py`; the content inside the window is the real egui render. Fonts and layout match egui on macOS. Regenerate them with:
+The other PNGs are renders of the current UI on a synthetic tree (`/Users/demo/Synthetic`, about 110 MB in 520 generated files). They are egui renders under Xvfb on Linux with XTest pointer input, not native macOS captures. The title bar, traffic lights and drop shadow are a mock-up added by `scripts/frame-screenshots.py`; the content inside the window is the real egui render. The macOS app can also use a system font for characters missing from the default egui fonts. Regenerate them with:
 
 ```bash
 python3 scripts/make-synthetic-tree.py /Users/demo/Synthetic

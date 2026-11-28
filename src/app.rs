@@ -239,6 +239,37 @@ pub fn run() -> eframe::Result<()> {
     )
 }
 
+#[cfg(target_os = "macos")]
+fn ensure_label_font(ctx: &egui::Context, label: &str) {
+    if label.is_ascii() {
+        return;
+    }
+    let attempted = egui::Id::new("system-fallback-font-attempted");
+    if ctx.data(|data| data.get_temp::<bool>(attempted).unwrap_or(false))
+        || ctx.fonts(|fonts| fonts.has_glyphs(&FontId::proportional(13.0), label))
+    {
+        return;
+    }
+    ctx.data_mut(|data| data.insert_temp(attempted, true));
+    // Keep a single backing buffer even when egui builds fonts for another display scale.
+    static FONT: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+    let Some(bytes) =
+        FONT.get_or_init(|| fs::read("/System/Library/Fonts/Supplemental/Arial Unicode.ttf").ok())
+    else {
+        return;
+    };
+    let mut fonts = egui::FontDefinitions::default();
+    let name = "Arial Unicode";
+    fonts
+        .font_data
+        .insert(name.into(), egui::FontData::from_static(bytes).into());
+    for family in fonts.families.values_mut() {
+        family.push(name.into());
+    }
+    ctx.set_fonts(fonts);
+    ctx.request_repaint();
+}
+
 /// Spacing, rounding, and selection color. Layout and information are unchanged.
 fn polish_style(ctx: &egui::Context) {
     ctx.style_mut(|style| {
@@ -261,6 +292,8 @@ impl eframe::App for SpaceTreeApp {
             self.start_scan(ctx);
         }
         self.poll_scan();
+        #[cfg(target_os = "macos")]
+        ensure_label_font(ctx, &self.path_text);
 
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::Q)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -695,6 +728,8 @@ impl SpaceTreeApp {
                                     }
                                 };
                                 row.col(|ui| {
+                                    #[cfg(target_os = "macos")]
+                                    ensure_label_font(ui.ctx(), &node.name);
                                     ui.add_space(depth as f32 * 14.0);
                                     if node.is_dir {
                                         let open = self.expanded.contains(&node.path);
@@ -733,6 +768,8 @@ impl SpaceTreeApp {
                                             }
                                             Err(_) if ollama.contains_key(&node.path) => {
                                                 let note = &ollama[&node.path];
+                                                #[cfg(target_os = "macos")]
+                                                ensure_label_font(ui.ctx(), &note.label);
                                                 ui.add(
                                                     Label::new(format!(
                                                         "{}  ·  {}",
@@ -1463,6 +1500,8 @@ fn one_line(
     color: Color32,
     max_width: f32,
 ) -> std::sync::Arc<egui::Galley> {
+    #[cfg(target_os = "macos")]
+    ensure_label_font(painter.ctx(), &text);
     let mut job = egui::text::LayoutJob::simple_singleline(text, font, color);
     job.wrap = egui::text::TextWrapping {
         max_width: max_width.max(1.0),
@@ -1765,4 +1804,29 @@ fn expand_to(root: &Node, path: &Path, expanded: &mut HashSet<PathBuf>) {
         false
     }
     walk(root, path, expanded);
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod font_tests {
+    use super::*;
+
+    #[test]
+    fn filename_glyphs_load_the_system_font_only_when_needed() {
+        let ctx = egui::Context::default();
+        let font = FontId::proportional(13.0);
+        let fixture = "模型.txt";
+        ctx.begin_pass(Default::default());
+        ensure_label_font(&ctx, "report.txt");
+        let _ = ctx.end_pass();
+        ctx.begin_pass(Default::default());
+        assert!(!ctx.fonts(|fonts| fonts.has_glyphs(&font, fixture)));
+        ensure_label_font(&ctx, fixture);
+        let _ = ctx.end_pass();
+        ctx.begin_pass(Default::default());
+        assert_eq!(
+            ctx.fonts(|fonts| fonts.has_glyphs(&font, fixture)),
+            Path::new("/System/Library/Fonts/Supplemental/Arial Unicode.ttf").is_file()
+        );
+        let _ = ctx.end_pass();
+    }
 }
