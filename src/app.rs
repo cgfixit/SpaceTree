@@ -1500,9 +1500,10 @@ fn incomplete_warning(result: &ScanResult) -> (String, bool) {
     let permissions = result.permission_count();
     if blocked > 0 {
         let parts: Vec<String> = [
-            (result.system_count, "system-only"),
+            (result.unknown_count, "cause unknown"),
+            (result.system_count, "system-owned"),
             (result.protected_count, "protected by macOS"),
-            (result.privacy_count, "privacy-protected"),
+            (result.privacy_count, "possibly privacy-protected"),
             (permissions, "closed by file permissions"),
         ]
         .iter()
@@ -1530,15 +1531,15 @@ fn incomplete_warning(result: &ScanResult) -> (String, bool) {
     } else {
         line.push_str(" Sizes are partial.");
     }
-    let act = result.privacy_count > 0 || permissions > 0 || other > 0;
+    let act = result.privacy_count > 0 || permissions > 0 || result.unknown_count > 0 || other > 0;
     if result.privacy_count > 0 {
         line.push_str(if result.disk_access == DiskAccess::Denied {
             " Full Disk Access is off for this copy of SpaceTree. If System Settings › Privacy & Security shows it on, remove SpaceTree there and add it again: macOS counts each update as a new app."
         } else {
-            " Full Disk Access (System Settings › Privacy & Security) lets a new scan read those."
+            " Review permissions for the affected folders."
         });
     } else if !act {
-        line.push_str(" That is expected: no setting opens them.");
+        line.push_str(" These refusals can be expected on this system.");
     }
     (line, act)
 }
@@ -1579,11 +1580,9 @@ fn hidden_help(result: &ScanResult) -> String {
             format_bytes(inside)
         ));
         if result.privacy_count > 0 {
-            text.push_str(" Full Disk Access for SpaceTree (System Settings › Privacy & Security) moves the privacy-protected folders into the table on the next scan.");
+            text.push_str(" Full Disk Access may help with privacy-protected folders.");
         } else if result.disk_access == DiskAccess::Granted {
-            text.push_str(
-                " Full Disk Access is on: what stays closed needs root or another user's rights.",
-            );
+            text.push_str(" Some folders may remain inaccessible with Full Disk Access.");
         }
     }
     text

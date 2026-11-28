@@ -111,17 +111,18 @@ pub fn format_refusals(result: &ScanResult) -> String {
         out.push_str("  ...\n");
     }
     for (count, what) in [
+        (result.unknown_count, "refused for an unknown reason"),
         (
             result.system_count,
-            "owned by system accounts: only root reads them, as on every Mac",
+            "system-owned directories refused access",
         ),
         (
             result.protected_count,
-            "protected by macOS although Full Disk Access is on: no setting opens them",
+            "refused although the Full Disk Access probe succeeded",
         ),
         (
             result.privacy_count,
-            "refused by macOS privacy protection: Full Disk Access opens them",
+            "possibly subject to macOS privacy protection",
         ),
         (
             result.permission_count(),
@@ -134,7 +135,7 @@ pub fn format_refusals(result: &ScanResult) -> String {
     }
     if result.privacy_count > 0 && result.disk_access == DiskAccess::Denied {
         out.push_str(
-            "Full Disk Access is not in effect for this process. For the app, turn it on in System Settings > Privacy & Security; if it is on already, remove SpaceTree from that list and add it again, because macOS treats each ad-hoc signed build as a new app. From Terminal, the grant that counts is Terminal's.\n",
+            "Full Disk Access is not in effect for this process. If the folder requires this access, review the app grant in System Settings > Privacy & Security; if it is on already, remove SpaceTree from that list and add it again, because macOS treats each ad-hoc signed build as a new app. From Terminal, the grant that counts is Terminal's.\n",
         );
     }
     out

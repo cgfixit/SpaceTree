@@ -129,19 +129,20 @@ pub struct ScanResult {
     /// How many of those were folders the system refused to open. Each one
     /// is one of the [`Refusal`] kinds counted below or plain permissions.
     pub blocked_count: u64,
-    /// Refused by macOS privacy protection while Full Disk Access was not in
-    /// effect: the ones turning it on opens.
+    /// Operation denied while the privacy database probe was denied too.
     pub privacy_count: u64,
+    /// Operation denied while the privacy probe was inconclusive.
+    pub unknown_count: u64,
     /// Refused by macOS (`EPERM`) although Full Disk Access was in effect:
-    /// System Integrity Protection or data vaults, which no setting opens.
+    /// The specific protection is unknown.
     pub protected_count: u64,
     /// Folders a system account (root, `_spotlight`, `_postfix`, ...) owns
-    /// and keeps closed to others: only root reads them, on every Mac.
+    /// for which an ordinary permission check failed.
     pub system_count: u64,
     /// The first [`BLOCKED_SAMPLE`] refused folders, sorted by path.
     pub blocked: Vec<Blocked>,
     /// Whether macOS let this process read what privacy protection guards
-    /// when the scan started.
+    /// when a relevant operation was refused.
     pub disk_access: DiskAccess,
 }
 
@@ -158,6 +159,7 @@ impl ScanResult {
     /// file permissions or an ACL on a folder of a user account.
     pub fn permission_count(&self) -> u64 {
         self.blocked_count
+            .saturating_sub(self.unknown_count)
             .saturating_sub(self.privacy_count)
             .saturating_sub(self.protected_count)
             .saturating_sub(self.system_count)
@@ -174,6 +176,7 @@ pub struct Blocked {
 /// Why a folder could not be opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Refusal {
+    Unknown,
     /// macOS privacy protection, and Full Disk Access was not in effect.
     Privacy,
     /// macOS refused although Full Disk Access was in effect.
@@ -188,9 +191,10 @@ impl Refusal {
     /// Short tag for lists of refused folders.
     pub fn label(self) -> &'static str {
         match self {
-            Refusal::Privacy => "privacy",
+            Refusal::Unknown => "cause unknown",
+            Refusal::Privacy => "possible privacy protection",
             Refusal::Protected => "protected by macOS",
-            Refusal::System => "system, root only",
+            Refusal::System => "system-owned, access denied",
             Refusal::Permissions => "permissions",
         }
     }
@@ -222,10 +226,10 @@ pub(crate) fn refusal_kind(
     // macOS answers EPERM for privacy protection, SIP, and data vaults, and
     // EACCES for permission bits or an ACL.
     if cfg!(target_os = "macos") && err.raw_os_error() == Some(libc::EPERM) {
-        return if access == DiskAccess::Granted {
-            Refusal::Protected
-        } else {
-            Refusal::Privacy
+        return match access {
+            DiskAccess::Granted => Refusal::Protected,
+            DiskAccess::Denied => Refusal::Privacy,
+            DiskAccess::Unknown => Refusal::Unknown,
         };
     }
     // `nobody` is a system account at the top of the range: -2 on macOS,
@@ -279,6 +283,7 @@ pub fn full_disk_access() -> DiskAccess {
 struct Refusals {
     total: AtomicU64,
     privacy: AtomicU64,
+    unknown: AtomicU64,
     protected: AtomicU64,
     system: AtomicU64,
     sample: Mutex<Vec<Blocked>>,
@@ -298,16 +303,20 @@ pub(crate) fn scan_with_volume(path: &Path, volume: VolumeSpace) -> io::Result<S
     // A whole-volume scan stays on that volume: other disks under /Volumes,
     // devfs, and disk images mounted inside it are not part of its used space.
     let skip = if volume.root_used.is_some() {
-        foreign_mounts(path)
+        foreign_mounts(path)?
     } else {
         HashSet::new()
     };
     let mut result = scan_inner(path, volume, &skip)?;
     // A whole-disk walk takes minutes and the disk changes meanwhile. Compare
     // the walk with the volume's figures as they are when it ends.
-    let after = volume_space(path);
-    let volume = if volume.root_used.is_some() && after.root_used.is_some() {
-        after
+    let volume = if volume.root_used.is_some() {
+        let after = volume_space(path);
+        if after.root_used.is_some() {
+            after
+        } else {
+            volume
+        }
     } else {
         volume
     };
@@ -328,7 +337,7 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
     let clones = CloneBook::default();
     let errors = AtomicU64::new(0);
     let refusals = Refusals::default();
-    let disk_access = full_disk_access();
+    let disk_access = std::sync::OnceLock::new();
     // The skip set holds real paths. A root reached through a symlink
     // (/Volumes/Macintosh HD for /) walks other names for the same folders.
     let real_root = if skip.is_empty() {
@@ -345,7 +354,7 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
         clones: &clones,
         errors: &errors,
         refusals: &refusals,
-        access: disk_access,
+        access: &disk_access,
         me: effective_uid(),
         twin: None,
     };
@@ -387,6 +396,7 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
         hidden_outside: 0,
         error_count: errors.into_inner(),
         blocked_count: refusals.total.into_inner(),
+        unknown_count: refusals.unknown.into_inner(),
         privacy_count: refusals.privacy.into_inner(),
         protected_count: refusals.protected.into_inner(),
         system_count: refusals.system.into_inner(),
@@ -398,7 +408,7 @@ fn scan_inner(path: &Path, volume: VolumeSpace, skip: &HashSet<PathBuf>) -> io::
             paths.sort();
             paths
         },
-        disk_access,
+        disk_access: disk_access.get().copied().unwrap_or_default(),
     })
 }
 
@@ -462,11 +472,8 @@ fn add_hidden_space(result: &mut ScanResult, used: u64, on_disk: u64) {
 
 /// Mount points other than the scan root's own volume, as both their mount
 /// path and, for the boot Data volume, the firmlinked path a walk of `/` uses.
-fn foreign_mounts(scan_root: &Path) -> HashSet<PathBuf> {
-    let Ok(root) = fs::canonicalize(scan_root) else {
-        return HashSet::new();
-    };
-    skip_set(&root, mount_points())
+fn foreign_mounts(scan_root: &Path) -> io::Result<HashSet<PathBuf>> {
+    Ok(skip_set(&fs::canonicalize(scan_root)?, mount_points()?))
 }
 
 fn skip_set(root: &Path, mounts: Vec<PathBuf>) -> HashSet<PathBuf> {
@@ -491,21 +498,16 @@ fn skip_set(root: &Path, mounts: Vec<PathBuf>) -> HashSet<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn mount_points() -> Vec<PathBuf> {
-    let mut list: *mut libc::statfs = std::ptr::null_mut();
-    // SAFETY: getmntinfo fills `list` with a buffer it owns; read `n` entries.
-    let n = unsafe { libc::getmntinfo(&mut list, libc::MNT_NOWAIT) };
-    if n <= 0 || list.is_null() {
-        return Vec::new();
-    }
-    // SAFETY: `list` points at `n` initialized statfs records.
-    let mounts = unsafe { std::slice::from_raw_parts(list, n as usize) };
-    mounts.iter().map(mount_path).collect()
+fn mount_points() -> io::Result<Vec<PathBuf>> {
+    Ok(crate::volumes::mount_snapshot()?
+        .iter()
+        .map(mount_path)
+        .collect())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn mount_points() -> Vec<PathBuf> {
-    Vec::new()
+fn mount_points() -> io::Result<Vec<PathBuf>> {
+    Ok(Vec::new())
 }
 
 #[cfg(target_os = "macos")]
@@ -897,26 +899,9 @@ fn leaf(
 }
 
 fn is_hidden_data_mount(scan_root: &Path, path: &Path) -> bool {
-    if path == scan_root {
-        return false;
-    }
-    if scan_root.starts_with(Path::new("/System/Volumes")) {
-        return false;
-    }
-    if path.starts_with(Path::new("/System/Volumes")) {
-        return true;
-    }
-    match path.strip_prefix(scan_root) {
-        Ok(rel) => {
-            let mut c = rel.components();
-            matches!(
-                (c.next(), c.next()),
-                (Some(std::path::Component::Normal(a)), Some(std::path::Component::Normal(b)))
-                    if a == "System" && b == "Volumes"
-            )
-        }
-        Err(_) => false,
-    }
+    cfg!(target_os = "macos")
+        && !scan_root.starts_with("/System/Volumes")
+        && path == Path::new("/System/Volumes")
 }
 
 /// APFS clone group id (0 = unknown). Same id means shared extents. Count once.
@@ -1058,34 +1043,24 @@ impl Drop for DirFd {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn open_dir(path: &Path) -> io::Result<DirFd> {
-    let mut bytes = Vec::with_capacity(path.as_os_str().len() + 1);
-    bytes.extend_from_slice(path.as_os_str().as_bytes());
-    if bytes.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path contains an interior NUL",
-        ));
+fn open_dir(path: &Path, root: bool, dev: u64, ino: u64) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = libc::O_DIRECTORY | if root { 0 } else { libc::O_NOFOLLOW };
+    let dir = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)?;
+    let meta = dir.metadata()?;
+    if dev_id(&meta) != dev || meta.ino() != ino {
+        return Err(io::Error::other("directory changed during scan"));
     }
-    bytes.push(0);
-    let fd = unsafe {
-        libc::open(
-            bytes.as_ptr().cast(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(DirFd(fd))
-    }
+    Ok(dir)
 }
 
 #[cfg(target_os = "macos")]
-fn list_bulk(path: &Path, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>> {
-    let dir = open_dir(path)?;
-    list_bulk_fd(dir.0, errors)
+fn list_bulk(dir: &fs::File, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>> {
+    use std::os::fd::AsRawFd;
+    list_bulk_fd(dir.as_raw_fd(), errors)
 }
 
 #[cfg(target_os = "macos")]
@@ -1216,6 +1191,13 @@ fn parse_bulk_entry(buf: &[u8], start: usize) -> Option<(usize, BulkEnt)> {
         name = OsString::from_vec(raw.to_vec());
         o += 8;
     }
+    if name.is_empty()
+        || common & ATTR_CMN_OBJTYPE == 0
+        || common & ATTR_CMN_DEVID == 0
+        || common & ATTR_CMN_FILEID == 0
+    {
+        return None;
+    }
     let mut dev = 0u64;
     if common & ATTR_CMN_DEVID != 0 {
         o = align4(o);
@@ -1247,7 +1229,7 @@ fn parse_bulk_entry(buf: &[u8], start: usize) -> Option<(usize, BulkEnt)> {
     }
     let mut data_length = 0u64;
     let mut alloc_size = 0u64;
-    let mut has_sizes = false;
+    let has_sizes = file & ATTR_FILE_ALLOCSIZE != 0 && file & ATTR_FILE_DATALENGTH != 0;
     // File attributes arrive in ascending bit order: LINKCOUNT (u32), then
     // ALLOCSIZE and DATALENGTH (off_t, signed).
     let mut nlink = 0u32;
@@ -1267,7 +1249,6 @@ fn parse_bulk_entry(buf: &[u8], start: usize) -> Option<(usize, BulkEnt)> {
         let bytes = i64::from_ne_bytes(rec[o..o + 8].try_into().ok()?);
         alloc_size = u64::try_from(bytes).unwrap_or(0);
         o += 8;
-        has_sizes = true;
     }
     if file & ATTR_FILE_DATALENGTH != 0 {
         o = align4(o);
@@ -1277,7 +1258,6 @@ fn parse_bulk_entry(buf: &[u8], start: usize) -> Option<(usize, BulkEnt)> {
         let bytes = i64::from_ne_bytes(rec[o..o + 8].try_into().ok()?);
         data_length = u64::try_from(bytes).unwrap_or(0);
         o += 8;
-        has_sizes = true;
     }
     // Fork (extended common) attributes also arrive in ascending bit order.
     let mut private_size = None;
@@ -1349,7 +1329,9 @@ fn system_time(sec: i64, nsec: i64) -> Option<SystemTime> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn list_bulk(path: &Path, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>> {
+fn list_bulk(dir: &fs::File, errors: &AtomicU64) -> io::Result<Vec<BulkEnt>> {
+    use std::os::fd::AsRawFd;
+    let path = format!("/proc/self/fd/{}", dir.as_raw_fd());
     let mut out = Vec::new();
     for ent in fs::read_dir(path)? {
         let ent = match ent {
@@ -1535,8 +1517,8 @@ struct Walk<'a> {
     /// The scan root's real path, when it differs from `scan_root`.
     real_root: Option<&'a Path>,
     refusals: &'a Refusals,
-    /// Full Disk Access state when the scan started.
-    access: DiskAccess,
+    /// Probe lazily on the first relevant refusal.
+    access: &'a std::sync::OnceLock<DiskAccess>,
     /// This process's effective user id.
     me: u32,
     /// Set for the walk of the Data volume's own root: a folder that is the
@@ -1574,8 +1556,10 @@ impl Walk<'_> {
     /// `None` when it cannot be listed or holds nothing more.
     fn outside_twin(&self) -> Option<Node> {
         let (own_root, _) = self.twin?;
-        let meta = fs::metadata(own_root).ok()?;
-        let (mut node, _) = self.dir(own_root, &meta).ok()?;
+        let (mut node, _) = fs::metadata(own_root)
+            .and_then(|meta| self.dir(own_root, &meta))
+            .map_err(|err| self.unreadable(own_root, &err))
+            .ok()?;
         node.children.retain(|c| c.size > 0 || c.files > 0);
         if node.children.is_empty() {
             return None;
@@ -1604,8 +1588,14 @@ impl Walk<'_> {
         r.total.fetch_add(1, Ordering::Relaxed);
         // The parent was listed, so the folder itself can still be stat'ed.
         let owner = fs::symlink_metadata(path).ok().map(|m| m.uid());
-        let kind = refusal_kind(err, owner, self.me, self.access);
+        let access = if cfg!(target_os = "macos") && err.raw_os_error() == Some(libc::EPERM) {
+            *self.access.get_or_init(full_disk_access)
+        } else {
+            DiskAccess::Unknown
+        };
+        let kind = refusal_kind(err, owner, self.me, access);
         let counter = match kind {
+            Refusal::Unknown => Some(&r.unknown),
             Refusal::Privacy => Some(&r.privacy),
             Refusal::Protected => Some(&r.protected),
             Refusal::System => Some(&r.system),
@@ -1624,6 +1614,7 @@ impl Walk<'_> {
     }
 
     fn dir(&self, path: &Path, meta: &Metadata) -> io::Result<(Node, BTreeMap<String, ExtSum>)> {
+        insert_seen(self.seen, dev_id(meta), meta.ino());
         self.dir_known(
             path,
             meta.modified().ok(),
@@ -1641,11 +1632,12 @@ impl Walk<'_> {
         dev: u64,
         ino: u64,
     ) -> io::Result<(Node, BTreeMap<String, ExtSum>)> {
-        let _ = insert_seen(self.seen, dev, ino);
         let mut children = Vec::new();
         let mut by_ext: BTreeMap<String, ExtSum> = BTreeMap::new();
         let mut subdirs = Vec::new();
-        let entries = match list_bulk(path, self.errors) {
+        let entries = match open_dir(path, path == self.scan_root, dev, ino)
+            .and_then(|dir| list_bulk(&dir, self.errors))
+        {
             Ok(entries) => entries,
             Err(err) if path == self.scan_root => return Err(err),
             Err(err) => {
@@ -2001,7 +1993,7 @@ mod whole_volume_tests {
             clones: &clones,
             errors: &errors,
             refusals: &refusals,
-            access: DiskAccess::Unknown,
+            access: &std::sync::OnceLock::new(),
             me: effective_uid(),
             twin: Some((&data, &twin)),
         };
@@ -2102,7 +2094,7 @@ mod whole_volume_tests {
         let by_access = |access| refusal_kind(&eperm, Some(me), me, access);
         if cfg!(target_os = "macos") {
             assert_eq!(by_access(DiskAccess::Denied), Refusal::Privacy);
-            assert_eq!(by_access(DiskAccess::Unknown), Refusal::Privacy);
+            assert_eq!(by_access(DiskAccess::Unknown), Refusal::Unknown);
             assert_eq!(by_access(DiskAccess::Granted), Refusal::Protected);
         } else {
             assert_eq!(by_access(DiskAccess::Denied), Refusal::Permissions);

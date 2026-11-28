@@ -180,17 +180,37 @@ pub fn mounted_volumes() -> Vec<MountedVolume> {
 }
 
 #[cfg(target_os = "macos")]
-fn raw_mounts() -> Vec<RawMount> {
-    let mut list: *mut libc::statfs = std::ptr::null_mut();
-    // SAFETY: getmntinfo fills `list` with a buffer it owns; read `n`
-    // entries. MNT_NOWAIT returns cached figures without asking servers.
-    let n = unsafe { libc::getmntinfo(&mut list, libc::MNT_NOWAIT) };
-    if n <= 0 || list.is_null() {
-        return Vec::new();
+pub(crate) fn mount_snapshot() -> std::io::Result<Vec<libc::statfs>> {
+    // Darwin returns the number copied when a buffer is supplied. Retry if
+    // the table filled it, including mounts added between the two calls.
+    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if count < 0 {
+        return Err(std::io::Error::last_os_error());
     }
-    // SAFETY: `list` points at `n` initialized statfs records.
-    let mounts = unsafe { std::slice::from_raw_parts(list, n as usize) };
-    mounts
+    let mut capacity = count as usize + 1;
+    loop {
+        let mut mounts = Vec::<libc::statfs>::with_capacity(capacity);
+        let bytes = i32::try_from(capacity * std::mem::size_of::<libc::statfs>())
+            .map_err(std::io::Error::other)?;
+        let n = unsafe { libc::getfsstat(mounts.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if (n as usize) < capacity {
+            // getfsstat initialized these n records in our own allocation.
+            unsafe {
+                mounts.set_len(n as usize);
+            }
+            return Ok(mounts);
+        }
+        capacity *= 2;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn raw_mounts() -> Vec<RawMount> {
+    mount_snapshot()
+        .unwrap_or_default()
         .iter()
         .map(|s| {
             let flag = |bit: libc::c_int| s.f_flags & bit as u32 != 0;
