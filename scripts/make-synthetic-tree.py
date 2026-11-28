@@ -18,11 +18,14 @@ TREE = {
 
 
 def write(path, size):
-    with open(path, "wb") as f:
+    with open(path, "xb") as f:
         f.write(b"\0" * int(size))
 
 
 def main(root):
+    os.makedirs(root, exist_ok=True)
+    if os.listdir(root):
+        sys.exit("Choose a new or empty directory for the synthetic tree.")
     for folder, files in TREE.items():
         d = os.path.join(root, folder)
         os.makedirs(d, exist_ok=True)
