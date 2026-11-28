@@ -180,6 +180,22 @@ fn logical_size_and_file_count_follow_the_leaves() {
 }
 
 #[test]
+fn directory_color_prefers_allocated_bytes_then_count_then_name() {
+    let fix = build_fixture();
+    let dir = fix.root.join("colors");
+    fs::create_dir(&dir).unwrap();
+    File::create(dir.join("one.aaa")).unwrap();
+    File::create(dir.join("one.bbb")).unwrap();
+    assert_eq!(scan(&dir).unwrap().root.color_ext, "aaa");
+
+    File::create(dir.join("two.bbb")).unwrap();
+    assert_eq!(scan(&dir).unwrap().root.color_ext, "bbb");
+
+    write_bytes(&dir.join("one.ccc"), 4096);
+    assert_eq!(scan(&dir).unwrap().root.color_ext, "ccc");
+}
+
+#[test]
 fn folder_size_is_sum_of_descendant_files() {
     let fix = build_fixture();
     let result = scan(&fix.root).unwrap();
