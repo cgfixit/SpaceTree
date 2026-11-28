@@ -15,11 +15,12 @@ from Xlib import X, display
 from Xlib.ext import xtest
 
 W, H = 1200, 780
-DISP = ":97"
+
 
 
 def shot(out, name):
     subprocess.run(["import", "-display", DISP, "-window", "root", os.path.join(out, name)], check=True)
+    subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "frame-screenshots.py"), os.path.join(out, name)], check=True)
 
 
 class Pointer:
@@ -43,21 +44,32 @@ class Pointer:
 
 def launch(binary, tree, env_extra):
     env = dict(os.environ, DISPLAY=DISP, LIBGL_ALWAYS_SOFTWARE="1", **env_extra)
+    if "SPACETREE_AUTOSCAN" not in env_extra:
+        env.pop("SPACETREE_AUTOSCAN", None)
     return subprocess.Popen([binary], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def main(binary, tree, out):
     os.makedirs(out, exist_ok=True)
-    xvfb = subprocess.Popen(["Xvfb", DISP, "-screen", "0", f"{W}x{H}x24", "+extension", "GLX"])
-    time.sleep(1.5)
+    global DISP
+    read_fd, write_fd = os.pipe()
     try:
+        xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-nolisten", "tcp", "-screen", "0", f"{W}x{H}x24", "+extension", "GLX"], pass_fds=(write_fd,))
+    finally:
+        os.close(write_fd)
+    try:
+        with os.fdopen(read_fd) as ready:
+            number = ready.readline().strip()
+        if not number.isdecimal() or xvfb.poll() is not None:
+            raise RuntimeError("Xvfb failed to allocate a display")
+        DISP = ":" + number
         p = Pointer()
         app = launch(binary, tree, {"HOME": os.path.dirname(tree)})
         time.sleep(3)
         shot(out, "empty-state.png")
         app.terminate(); app.wait()
 
-        app = launch(binary, tree, {"SPACETREE_AUTOSCAN": tree})
+        app = launch(binary, tree, {"SPACETREE_AUTOSCAN": tree, "HOME": os.path.dirname(tree)})
         time.sleep(4)
         p.click(460, 148)  # Archives row (percentage cell: selects without expanding)
         shot(out, "treemap-table-folder-selection.png")
@@ -73,10 +85,9 @@ def main(binary, tree, out):
         time.sleep(0.6)
         shot(out, "treemap-zoom-breadcrumb.png")
         app.terminate(); app.wait()
-        pngs = [os.path.join(out, n) for n in os.listdir(out) if n.endswith(".png")]
-        subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "frame-screenshots.py"), *pngs], check=True)
     finally:
         xvfb.terminate()
+        xvfb.wait()
 
 
 if __name__ == "__main__":
