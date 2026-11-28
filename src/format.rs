@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::scan::{raw_available, try_volume_space, volume_space};
+use crate::scan::{raw_available, try_volume_space};
 use crate::{full_disk_access, DiskAccess, Node, ScanResult, HIDDEN_KEY};
 
 /// Stable text dump of a scan for the `--scan` CLI and tests.
@@ -53,10 +53,6 @@ fn push_available(out: &mut String, free: u64, available: Option<u64>, on_disk: 
 /// Volume figures for `path` without walking it, for the `--volume` CLI: the
 /// header lines `--scan` prints, then macOS's unfiltered Available answer for
 /// each mount it was asked about.
-pub fn format_volume(path: &Path) -> String {
-    volume_report(path, volume_space(path))
-}
-
 pub fn try_format_volume(path: &Path) -> std::io::Result<String> {
     let volume = try_volume_space(path)?;
     if volume.total == 0 {

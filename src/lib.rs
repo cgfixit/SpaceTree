@@ -16,13 +16,12 @@ pub use ext::{
     LegendRow, Rgb, HIDDEN_KEY,
 };
 pub use format::{
-    format_bytes, format_refusals, format_scan, format_scan_to_depth, format_volume,
-    try_format_volume,
+    format_bytes, format_refusals, format_scan, format_scan_to_depth, try_format_volume,
 };
 pub use layout::{layout_node, split_span, treemap_focus, Frame, PxRect, Tile, Tiling};
 pub use ollama::{
-    blob_notes, default_models_dir, format_ollama, ollama_report, BlobNote, BlobUse, OllamaLayer,
-    OllamaModel, OllamaStore,
+    blob_notes, default_models_dir, ollama_report, BlobNote, BlobUse, OllamaLayer, OllamaModel,
+    OllamaStore,
 };
 pub use scan::{
     full_disk_access, scan, Blocked, DiskAccess, Node, Refusal, ScanResult, BLOCKED_SAMPLE,
