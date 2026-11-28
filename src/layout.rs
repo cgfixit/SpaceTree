@@ -12,15 +12,6 @@ pub struct PxRect {
     pub h: u32,
 }
 
-#[derive(Clone, Debug)]
-pub struct LayoutItem {
-    pub path: PathBuf,
-    pub weight: u64,
-    pub color_ext: String,
-    pub merged: bool,
-    pub children: Vec<LayoutItem>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tile {
     pub path: PathBuf,
@@ -142,12 +133,6 @@ pub fn split_span(span: u32, weights: &[u64]) -> Vec<u32> {
     out
 }
 
-pub fn layout_items(items: &[LayoutItem], bounds: PxRect) -> Tiling {
-    let mut out = Out::new();
-    place_list(items, bounds, &mut out);
-    out.finish(bounds)
-}
-
 pub fn layout_node(focus: &Node, bounds: PxRect) -> Tiling {
     let mut out = Out::new();
     place_one_node(focus, bounds, &mut out);
@@ -202,32 +187,12 @@ struct Part<'a> {
     weight: u64,
     color_ext: &'a str,
     merged: bool,
-    kids: Kids<'a>,
-}
-
-enum Kids<'a> {
-    Items(&'a [LayoutItem]),
-    Nodes(&'a [Node]),
-    Leaf,
+    children: &'a [Node],
 }
 
 fn tile_budget(rect: PxRect) -> usize {
     let px = u64::from(rect.w).saturating_mul(u64::from(rect.h));
     px.saturating_div(16).clamp(64, 1024) as usize
-}
-
-fn part_item(item: &LayoutItem) -> Part<'_> {
-    Part {
-        path: &item.path,
-        weight: item.weight,
-        color_ext: &item.color_ext,
-        merged: item.merged,
-        kids: if item.children.is_empty() {
-            Kids::Leaf
-        } else {
-            Kids::Items(&item.children)
-        },
-    }
 }
 
 fn part_node(node: &Node) -> Part<'_> {
@@ -236,36 +201,8 @@ fn part_node(node: &Node) -> Part<'_> {
         weight: node.size,
         color_ext: &node.color_ext,
         merged: false,
-        kids: if node.is_dir && !node.children.is_empty() {
-            Kids::Nodes(&node.children)
-        } else {
-            Kids::Leaf
-        },
+        children: if node.is_dir { &node.children } else { &[] },
     }
-}
-
-fn place_list(items: &[LayoutItem], bounds: PxRect, out: &mut Out) {
-    let mut live: Vec<&LayoutItem> = items.iter().filter(|i| i.weight > 0).collect();
-    live.sort_by(|a, b| b.weight.cmp(&a.weight).then_with(|| a.path.cmp(&b.path)));
-    let budget = tile_budget(bounds);
-    if live.len() > budget {
-        let dust_weight: u64 = live[budget - 1..].iter().map(|i| i.weight).sum();
-        let donor = live[budget - 1];
-        let dust = LayoutItem {
-            path: donor.path.clone(),
-            weight: dust_weight,
-            color_ext: donor.color_ext.clone(),
-            merged: true,
-            children: Vec::new(),
-        };
-        let mut parts: Vec<Part<'_>> = live[..budget - 1].iter().copied().map(part_item).collect();
-        parts.push(part_item(&dust));
-        parts.sort_by(|a, b| b.weight.cmp(&a.weight).then_with(|| a.path.cmp(b.path)));
-        squarify(&parts, bounds, out);
-        return;
-    }
-    let parts: Vec<Part<'_>> = live.iter().copied().map(part_item).collect();
-    squarify(&parts, bounds, out);
 }
 
 fn place_nodes(nodes: &[Node], bounds: PxRect, out: &mut Out) {
@@ -275,15 +212,14 @@ fn place_nodes(nodes: &[Node], bounds: PxRect, out: &mut Out) {
     if live.len() > budget {
         let dust_weight: u64 = live[budget - 1..].iter().map(|n| n.size).sum();
         let donor = live[budget - 1];
-        let dust = LayoutItem {
-            path: donor.path.clone(),
-            weight: dust_weight,
-            color_ext: donor.color_ext.clone(),
-            merged: true,
-            children: Vec::new(),
-        };
         let mut parts: Vec<Part<'_>> = live[..budget - 1].iter().copied().map(part_node).collect();
-        parts.push(part_item(&dust));
+        parts.push(Part {
+            path: &donor.path,
+            weight: dust_weight,
+            color_ext: &donor.color_ext,
+            merged: true,
+            children: &[],
+        });
         parts.sort_by(|a, b| b.weight.cmp(&a.weight).then_with(|| a.path.cmp(b.path)));
         squarify(&parts, bounds, out);
         return;
@@ -326,7 +262,7 @@ fn place_one(part: &Part<'_>, rect: PxRect, out: &mut Out) {
         return;
     }
     let tiny = rect.w < 4 || rect.h < 4;
-    if tiny || matches!(part.kids, Kids::Leaf) {
+    if tiny || part.children.is_empty() {
         push_tile(
             out,
             part.path,
@@ -344,11 +280,7 @@ fn place_one(part: &Part<'_>, rect: PxRect, out: &mut Out) {
         weight: part.weight,
         depth: out.depth,
     });
-    match part.kids {
-        Kids::Items(children) => place_list(children, rect, out),
-        Kids::Nodes(children) => place_nodes(children, rect, out),
-        Kids::Leaf => {}
-    }
+    place_nodes(part.children, rect, out);
     out.depth -= 1;
 }
 

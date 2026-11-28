@@ -31,7 +31,6 @@ enum Phase {
 }
 
 struct MapCache {
-    generation: u64,
     focus: PathBuf,
     bounds: PxRect,
     tiling: Tiling,
@@ -71,7 +70,6 @@ struct SpaceTreeApp {
     /// Symlink targets of rows the table has drawn, read once per scan
     /// instead of once per frame.
     links: RefCell<HashMap<PathBuf, Option<PathBuf>>>,
-    generation: u64,
     map_cache: Option<MapCache>,
     zoom: Option<PathBuf>,
     /// Extension key under the pointer in the legend; the map dims the rest.
@@ -106,7 +104,6 @@ impl SpaceTreeApp {
             legend: Vec::new(),
             ollama: BTreeMap::new(),
             links: RefCell::new(HashMap::new()),
-            generation: 0,
             map_cache: None,
             zoom: None,
             legend_hover: None,
@@ -186,7 +183,6 @@ impl SpaceTreeApp {
                     self.legend = finished.legend;
                     self.ollama = finished.ollama;
                     self.zoom = None;
-                    self.generation = self.generation.wrapping_add(1);
                     self.map_cache = None;
                     self.expanded.clear();
                     self.expanded.insert(finished.result.root.path.clone());
@@ -1055,11 +1051,10 @@ impl SpaceTreeApp {
             );
             return;
         }
-        let stale = self.map_cache.as_ref().is_none_or(|cache| {
-            cache.generation != self.generation
-                || cache.focus != focus_path
-                || cache.bounds != bounds
-        });
+        let stale = self
+            .map_cache
+            .as_ref()
+            .is_none_or(|cache| cache.focus != focus_path || cache.bounds != bounds);
         if stale {
             let tiling = self
                 .result
@@ -1067,7 +1062,6 @@ impl SpaceTreeApp {
                 .map(|r| layout_node(self.map_focus(&r.root), bounds));
             if let Some(tiling) = tiling {
                 self.map_cache = Some(MapCache {
-                    generation: self.generation,
                     focus: focus_path.clone(),
                     bounds,
                     tiling,
