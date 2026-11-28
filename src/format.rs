@@ -54,7 +54,19 @@ fn push_available(out: &mut String, free: u64, available: Option<u64>, on_disk: 
 /// header lines `--scan` prints, then macOS's unfiltered Available answer for
 /// each mount it was asked about.
 pub fn format_volume(path: &Path) -> String {
+    volume_report(path, volume_space(path))
+}
+
+pub fn try_format_volume(path: &Path) -> std::io::Result<String> {
+    std::fs::metadata(path)?;
     let volume = volume_space(path);
+    if volume.total == 0 {
+        return Err(std::io::Error::other("volume capacity unavailable"));
+    }
+    Ok(volume_report(path, volume))
+}
+
+fn volume_report(path: &Path, volume: crate::scan::VolumeSpace) -> String {
     let mut out = String::new();
     out.push_str(&format!("volume_total_bytes={}\n", volume.total));
     out.push_str(&format!("volume_free_bytes={}\n", volume.free));
@@ -91,7 +103,7 @@ pub fn format_refusals(result: &ScanResult) -> String {
     for blocked in &result.blocked {
         out.push_str(&format!(
             "  {}  ({})\n",
-            blocked.path.display(),
+            report_name(&blocked.path.to_string_lossy()),
             blocked.kind.label()
         ));
     }
@@ -128,6 +140,21 @@ pub fn format_refusals(result: &ScanResult) -> String {
     out
 }
 
+fn report_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if !name.chars().any(|c| c.is_control() || c == '\\') {
+        return name.into();
+    }
+    let mut escaped = String::new();
+    for c in name.chars() {
+        if c.is_control() || c == '\\' {
+            escaped.extend(c.escape_default());
+        } else {
+            escaped.push(c);
+        }
+    }
+    escaped.into()
+}
+
 fn push_node(out: &mut String, node: &Node, depth: usize, max_depth: usize) {
     for _ in 0..depth {
         out.push_str("  ");
@@ -146,7 +173,7 @@ fn push_node(out: &mut String, node: &Node, depth: usize, max_depth: usize) {
         unix_secs(node.modified),
         unix_secs(node.created),
         kind,
-        node.name
+        report_name(&node.name)
     ));
     if depth >= max_depth {
         return;

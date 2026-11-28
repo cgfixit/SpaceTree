@@ -1,15 +1,20 @@
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if let Some(i) = args.iter().position(|a| a == "--scan") {
         let path = args.get(i + 1).cloned().unwrap_or_else(|| ".".into());
+        let depth = match args.iter().position(|a| a == "--depth") {
+            Some(d) => args
+                .get(d + 1)
+                .and_then(|v| v.to_str())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| {
+                    eprintln!("--depth requires a nonnegative integer");
+                    std::process::exit(2)
+                }),
+            None => usize::MAX,
+        };
         match spacetree::scan(std::path::Path::new(&path)) {
             Ok(result) => {
-                let depth = args
-                    .iter()
-                    .position(|a| a == "--depth")
-                    .and_then(|d| args.get(d + 1))
-                    .and_then(|n| n.parse().ok())
-                    .unwrap_or(usize::MAX);
                 print!("{}", spacetree::format_scan_to_depth(&result, depth));
                 if result.error_count > 0 {
                     eprintln!(
@@ -46,7 +51,13 @@ fn main() {
     }
     if let Some(i) = args.iter().position(|a| a == "--volume") {
         let path = args.get(i + 1).cloned().unwrap_or_else(|| "/".into());
-        print!("{}", spacetree::format_volume(std::path::Path::new(&path)));
+        match spacetree::try_format_volume(std::path::Path::new(&path)) {
+            Ok(text) => print!("{text}"),
+            Err(e) => {
+                eprintln!("volume lookup failed: {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--ollama") {

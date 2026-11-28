@@ -52,6 +52,7 @@ enum ScanUpdate {
 
 struct SpaceTreeApp {
     path_text: String,
+    chosen_path: Option<PathBuf>,
     phase: Phase,
     result: Option<ScanResult>,
     rx: Option<Receiver<ScanUpdate>>,
@@ -83,9 +84,13 @@ struct SpaceTreeApp {
 
 impl SpaceTreeApp {
     fn new() -> Self {
-        let autoscan = std::env::var("SPACETREE_AUTOSCAN").ok();
+        let autoscan = std::env::var_os("SPACETREE_AUTOSCAN").map(PathBuf::from);
         Self {
-            path_text: autoscan.clone().unwrap_or_else(default_path),
+            path_text: autoscan
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(default_path),
+            chosen_path: autoscan.clone(),
             phase: Phase::Idle,
             result: None,
             rx: None,
@@ -114,12 +119,14 @@ impl SpaceTreeApp {
         if matches!(self.phase, Phase::Scanning(_)) {
             return;
         }
-        let trimmed = self.path_text.trim();
-        if trimmed.is_empty() {
+        if self.path_text.is_empty() {
             self.phase = Phase::Failed("path is empty".into());
             return;
         }
-        let path = PathBuf::from(trimmed);
+        let path = self
+            .chosen_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(&self.path_text));
         self.phase = Phase::Scanning(path.clone());
         self.result = None;
         self.volume = VolumeSpace::default();
@@ -321,6 +328,7 @@ impl eframe::App for SpaceTreeApp {
                     if ui.button("Browse…").clicked() && !scanning {
                         if let Some(p) = rfd::FileDialog::new().pick_folder() {
                             self.path_text = p.to_string_lossy().into_owned();
+                            self.chosen_path = Some(p);
                         }
                     }
                     if let Some(path) = ui
@@ -328,6 +336,7 @@ impl eframe::App for SpaceTreeApp {
                         .inner
                     {
                         self.path_text = path.to_string_lossy().into_owned();
+                        self.chosen_path = Some(path);
                         self.start_scan(ctx);
                     }
                     let edit = ui.add(
@@ -335,6 +344,9 @@ impl eframe::App for SpaceTreeApp {
                             .hint_text("Folder to scan")
                             .desired_width(ui.available_width()),
                     );
+                    if edit.changed() {
+                        self.chosen_path = None;
+                    }
                     self.path_focused = edit.has_focus();
                 });
             });
@@ -687,13 +699,17 @@ impl SpaceTreeApp {
                                     if node.is_dir {
                                         let open = self.expanded.contains(&node.path);
                                         let tri = if open { "⏷" } else { "⏵" };
+                                        if ui.small_button(tri).clicked() {
+                                            toggles.push(node.path.clone());
+                                        }
                                         let r = ui.add(
-                                            Label::new(format!("{tri}  {}", node.name))
-                                                .sense(Sense::click())
-                                                .truncate(),
+                                            Label::new(&node.name).sense(Sense::click()).truncate(),
                                         );
                                         if r.clicked() {
-                                            toggles.push(node.path.clone());
+                                            clicked = Some(node.path.clone());
+                                        }
+                                        if r.double_clicked() {
+                                            dbl = Some(node.path.clone());
                                         }
                                         // This label owns its clicks, so the row
                                         // response cannot open the menu for it.
@@ -1254,7 +1270,7 @@ impl SpaceTreeApp {
             });
         }
 
-        if response.clicked() || response.double_clicked() {
+        if !target_merged && (response.clicked() || response.double_clicked()) {
             if let Some(path) = target {
                 let is_dir = self
                     .result
@@ -1265,7 +1281,7 @@ impl SpaceTreeApp {
                     expand_to(&result.root, &path, &mut self.expanded);
                 }
                 self.selected = Some(path.clone());
-                if response.double_clicked() && is_dir && !target_merged {
+                if response.double_clicked() && is_dir {
                     self.zoom = Some(path);
                     self.map_cache = None;
                 } else if response.double_clicked() && !is_dir {
