@@ -21,7 +21,7 @@ def scan(binary, root):
         raise SystemExit(f"{binary}: unexpected scan report")
     return elapsed_ms, {
         "root_size_bytes": int(lines[1].split("=", 1)[1]),
-        "report_rows": len(lines) - 2,
+        "report_rows": sum(line.lstrip()[:1].isdigit() for line in lines),
     }
 
 

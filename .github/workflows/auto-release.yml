@@ -51,6 +51,14 @@ jobs:
             SpaceTree.app
             cargo-deny
             gitleaks
+            clippy
+            rustfmt
+            actionlint
+            Microsoft Security DevOps
+            Analyze (actions)
+            Analyze (javascript-typescript)
+            Analyze (python)
+            Analyze (rust)
         run: |
           set -euo pipefail
           repo="$GITHUB_REPOSITORY"
@@ -88,6 +96,9 @@ jobs:
               if [ "$(printf '%s' "$runs" | jq --arg n "$need" '[.[] | select(.name == $n)] | length')" = "0" ]; then
                 waiting="required check '$need' has not reported on $short yet."
                 break
+              fi
+              if printf '%s' "$runs" | jq -e --arg n "$need" 'any(.[]; .name == $n and .status == "completed" and .conclusion != "success")' >/dev/null; then
+                hold "required check '$need' did not succeed on $short."
               fi
             done <<< "$REQUIRED"
             pending="$(printf '%s' "$runs" | jq -r '.[] | select(.status != "completed") | .name')"
@@ -204,7 +215,7 @@ jobs:
           notes="${RUNNER_TEMP}/notes.md"
           {
             printf 'SpaceTree %s for macOS (%s), built from main at %s.\n\n' "$VERSION" "$arch" "$SHA"
-            printf 'Published automatically after every check on this commit passed.\n'
+            printf 'Published automatically after the required checks on this commit succeeded.\n'
             printf 'Bundle run: %s/%s/actions/runs/%s\n\n' "$GITHUB_SERVER_URL" "$repo" "$RUN_ID"
             printf 'Ad-hoc signed with codesign --sign -. Not notarized.\n'
             printf 'First launch: right-click SpaceTree.app and choose Open.\n\n'

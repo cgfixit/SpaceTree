@@ -79,7 +79,7 @@ cargo run -- --gui-scan /path         # open the app and scan
 
 ## Build and package
 
-You need macOS 12 or newer, the Xcode Command Line Tools, and a current stable Rust. `Cargo.toml` records `rust-version` 1.85.0, but the pinned `eframe` 0.31.1 crates need a newer compiler.
+You need macOS 12 or newer, Xcode Command Line Tools, Python 3 and Rust. The locked CLI builds with Rust 1.85.0 on Apple silicon.
 
 ```bash
 ./scripts/make-app.sh
@@ -90,7 +90,7 @@ open dist/SpaceTree.app
 
 ## Releases
 
-Every merge to `main` whose checks all pass is published as a GitHub release by `.github/workflows/auto-release.yml`, tagged `v<version>-main.<date>.<sha>`. It starts when the bundle or test run for that commit finishes and waits up to 30 minutes for the remaining checks, so the release normally appears a few minutes after the merge. `release.yml` publishes a named `v<version>` release, and `release-bundle.yml` builds and publishes the app from any ref on demand.
+The newest `main` commit whose required checks succeed is published as a GitHub release by `.github/workflows/auto-release.yml`, tagged `v<version>-main.<date>.<sha>`. It starts when the bundle or test run for that commit finishes and waits up to 30 minutes for the remaining checks, so the release normally appears a few minutes after the merge. A newer head can supersede an earlier merge while checks are pending. `release.yml` publishes a named `v<version>` release, and `release-bundle.yml` builds and publishes the app from any ref on demand.
 
 ## Comparing scan speed
 
