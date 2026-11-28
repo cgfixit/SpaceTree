@@ -88,7 +88,7 @@ open dist/SpaceTree.app
 
 ## Releases
 
-The newest `main` commit whose required checks succeed is published as a GitHub release by `.github/workflows/auto-release.yml`, tagged `v<version>-main.<date>.<sha>`. It starts when the bundle or test run for that commit finishes and waits up to 30 minutes for the remaining checks, so the release normally appears a few minutes after the merge. A newer head can supersede an earlier merge while checks are pending. `release.yml` publishes a named `v<version>` release, and `release-bundle.yml` builds and publishes the app from any ref on demand.
+The newest `main` commit whose required checks succeed is published as a GitHub release by `.github/workflows/auto-release.yml`, tagged `v<version>-main.<date>.<sha>`. It starts when the bundle or test run for that commit finishes and waits up to 30 minutes for the remaining checks, so the release normally appears a few minutes after the merge. Immediately before creating the release, the publisher reads `main` again and skips the older commit if the branch has moved. The branch can still advance between that read and release creation. `release.yml` publishes a named `v<version>` release, and `release-bundle.yml` builds and publishes the app from any ref on demand.
 
 ## Comparing scan speed
 
