@@ -52,9 +52,7 @@ jobs:
           set -euo pipefail
           app="dist/SpaceTree.app"
           bin="$app/Contents/MacOS/spacetree"
-          test -x "$bin"
-          test "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" = "com.cgfixit.spacetree"
-          codesign --verify --verbose=2 "$app"
+          sh scripts/verify-app.sh "$app" >/dev/null
           lipo -info "$bin" | grep -q "$(uname -m)"
           test "$(plutil -extract CFBundleIconFile raw "$app/Contents/Info.plist")" = "AppIcon"
           icns="$app/Contents/Resources/AppIcon.icns"
@@ -73,10 +71,7 @@ jobs:
             *) echo "unexpected arch $(uname -m)" >&2; exit 1 ;;
           esac
           ditto -c -k --keepParent dist/SpaceTree.app "dist/SpaceTree-macos-${arch}.zip"
-          rm -rf "${RUNNER_TEMP}/unzip"
-          mkdir -p "${RUNNER_TEMP}/unzip"
-          ditto -x -k "dist/SpaceTree-macos-${arch}.zip" "${RUNNER_TEMP}/unzip"
-          codesign --verify --verbose=2 "${RUNNER_TEMP}/unzip/SpaceTree.app"
+          sh scripts/verify-app.sh "dist/SpaceTree-macos-${arch}.zip" >/dev/null
 
       - name: Upload app zip
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

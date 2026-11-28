@@ -158,6 +158,13 @@ jobs:
           ref: ${{ needs.gate.outputs.sha }}
           persist-credentials: false
 
+      - name: Checkout verification helper
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow-source
+          persist-credentials: false
+
       - name: Download and verify the bundle
         id: verify
         env:
@@ -175,19 +182,11 @@ jobs:
             echo "expected exactly one app zip" >&2
             exit 1
           fi
-          unpack="${RUNNER_TEMP}/verify-app"
-          rm -rf "$unpack"
-          mkdir -p "$unpack"
-          ditto -x -k "$zip" "$unpack"
-          app="$unpack/SpaceTree.app"
-          test -x "$app/Contents/MacOS/spacetree"
-          test "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" = "com.cgfixit.spacetree"
-          plist_version="$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")"
+          plist_version="$(sh workflow-source/scripts/verify-app.sh "$zip")"
           if [ "$plist_version" != "$VERSION" ]; then
             echo "Info.plist $plist_version does not match Cargo.toml $VERSION" >&2
             exit 1
           fi
-          codesign --verify --verbose=2 "$app"
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
 
       - name: Publish the release
