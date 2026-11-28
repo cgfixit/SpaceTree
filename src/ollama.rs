@@ -9,7 +9,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::{format_bytes, Node};
@@ -71,12 +72,7 @@ impl OllamaStore {
             ..Default::default()
         };
         for file in files {
-            let layers = fs::metadata(&file)
-                .ok()
-                .filter(|meta| meta.len() <= MAX_MANIFEST_BYTES)
-                .and_then(|_| fs::read_to_string(&file).ok())
-                .and_then(|text| manifest_layers(&text));
-            let Some(layers) = layers else {
+            let Some(layers) = read_manifest(&file) else {
                 store.unreadable.push(file);
                 continue;
             };
@@ -430,6 +426,31 @@ fn model_name(manifests: &Path, file: &Path) -> String {
     }
 }
 
+fn read_manifest(path: &Path) -> Option<Vec<OllamaLayer>> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_MANIFEST_BYTES {
+        return None;
+    }
+    read_manifest_layers(file)
+}
+
+fn read_manifest_layers(reader: impl Read) -> Option<Vec<OllamaLayer>> {
+    let mut text = String::new();
+    reader
+        .take(MAX_MANIFEST_BYTES + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    if text.len() as u64 > MAX_MANIFEST_BYTES {
+        return None;
+    }
+    manifest_layers(&text)
+}
+
 /// The config and layers of a manifest, or `None` when the text is not one.
 fn manifest_layers(text: &str) -> Option<Vec<OllamaLayer>> {
     let top: serde_json::Value = serde_json::from_str(text).ok()?;
@@ -482,6 +503,18 @@ mod tests {
       "layers":[
         {"mediaType":"application/vnd.ollama.image.model","digest":"sha256:ab12","size":4661211808},
         {"mediaType":"application/vnd.ollama.image.template","digest":"sha256:cd34","size":254}]}"#;
+
+    #[test]
+    fn manifest_read_stops_at_the_limit_plus_one_byte() {
+        let manifest = br#"{"layers":[{"digest":"sha256:ab","mediaType":"application/vnd.ollama.image.\u6a21\u578b"}]}"#;
+        let mut bytes = manifest.to_vec();
+        bytes.resize(MAX_MANIFEST_BYTES as usize, b' ');
+        assert_eq!(read_manifest_layers(&bytes[..]).unwrap()[0].kind, "模型");
+        bytes.extend_from_slice(b"  ");
+        let mut reader = std::io::Cursor::new(bytes);
+        assert!(read_manifest_layers(&mut reader).is_none());
+        assert_eq!(reader.position(), MAX_MANIFEST_BYTES + 1);
+    }
 
     #[test]
     fn a_manifest_lists_its_layers_then_its_config() {
