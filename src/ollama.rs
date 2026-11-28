@@ -224,11 +224,7 @@ pub fn default_models_dir() -> Option<PathBuf> {
 }
 
 /// Text report of a `models` directory for the `--ollama` CLI: each model
-/// with its blobs, then what no model uses. `Err` when `dir` is not a store.
-pub fn format_ollama(dir: &Path) -> Result<String, String> {
-    ollama_report(dir).map(|(text, _)| text)
-}
-
+/// with its blobs and inventory status. `Err` when `dir` is not a store.
 pub fn ollama_report(dir: &Path) -> Result<(String, bool), String> {
     let store = OllamaStore::load(dir)
         .ok_or_else(|| format!("{}: no manifests directory", dir.display()))?;
@@ -585,7 +581,8 @@ mod tests {
         for blob in ["sha256-ab12", "sha256-cd34", "sha256-ffff"] {
             fs::write(dir.join("blobs").join(blob), b"x").unwrap();
         }
-        let report = format_ollama(&dir).unwrap();
+        let (report, complete) = ollama_report(&dir).unwrap();
+        assert!(!complete);
         fs::remove_dir_all(&dir).unwrap();
         assert!(report.contains("shared with tuned:v1"), "{report}");
         assert!(report.contains("MISSING"), "{report}");
@@ -594,7 +591,7 @@ mod tests {
             "{report}"
         );
         assert!(!report.contains("ollama rm "));
-        assert!(format_ollama(Path::new("/nonexistent-spacetree")).is_err());
+        assert!(ollama_report(Path::new("/nonexistent-spacetree")).is_err());
         assert_eq!(
             remove_command("hf.co/org/repo:Q4_K_M").as_deref(),
             Some("ollama rm hf.co/org/repo:Q4_K_M")
