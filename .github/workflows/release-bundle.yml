@@ -59,11 +59,7 @@ jobs:
         run: |
           set -euo pipefail
           app="dist/SpaceTree.app"
-          bin="$app/Contents/MacOS/spacetree"
-          test -x "$bin"
-          test "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" = "com.cgfixit.spacetree"
-          codesign --verify --verbose=2 "$app"
-          version="$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")"
+          version="$(sh scripts/verify-app.sh "$app")"
           cargo_version="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
           if [ "$version" != "$cargo_version" ]; then
             echo "Info.plist $version does not match Cargo.toml $cargo_version" >&2
@@ -90,10 +86,7 @@ jobs:
           fi
           zip="dist/SpaceTree-${version}-macos-${arch}.app.zip"
           ditto -c -k --keepParent "$app" "$zip"
-          rm -rf "${RUNNER_TEMP}/unzip"
-          mkdir -p "${RUNNER_TEMP}/unzip"
-          ditto -x -k "$zip" "${RUNNER_TEMP}/unzip"
-          codesign --verify --verbose=2 "${RUNNER_TEMP}/unzip/SpaceTree.app"
+          sh scripts/verify-app.sh "$zip" >/dev/null
           {
             echo "tag=$tag"
             echo "zip=$zip"
